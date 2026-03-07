@@ -1,0 +1,27 @@
+{
+  "generatedAt": "2026-02-28T15:19:37.524114Z",
+  "count": 3,
+  "files": [
+    {
+      "path": "/Users/ilamorozov/SWAGReviewer/SWAGReviewer/backend/frontend/src/debug/mocks/01-ilyamr11-miapp-pr-20.json",
+      "presetId": "preset-1",
+      "owner": "IlyaMr11",
+      "repo": "MIApp",
+      "prNumber": 20
+    },
+    {
+      "path": "/Users/ilamorozov/SWAGReviewer/SWAGReviewer/backend/frontend/src/debug/mocks/02-ilyamr11-miapp-pr-21.json",
+      "presetId": "preset-2",
+      "owner": "IlyaMr11",
+      "repo": "MIApp",
+      "prNumber": 21
+    },
+    {
+      "path": "/Users/ilamorozov/SWAGReviewer/SWAGReviewer/backend/frontend/src/debug/mocks/03-ilyamr11-miapp-pr-23.json",
+      "presetId": "preset-3",
+      "owner": "IlyaMr11",
+      "repo": "MIApp",
+      "prNumber": 23
+    }
+  ]
+}

@@ -15,7 +15,7 @@
 
 ## Требования
 - Запущенный backend на `http://localhost:4000`
-- Node/npm установлены
+- Python 3.10+
 - Personal Access Token GitHub с доступом к нужному repo/PR
 
 ## Переменные окружения
@@ -35,17 +35,21 @@
 ## Запуск
 ```bash
 cd backend
-npm run dev
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
 ```
 
 В другом терминале:
 ```bash
 cd backend
+source .venv/bin/activate
 GITHUB_TOKEN=ghp_xxx \
 GH_OWNER=your-org \
 GH_REPO=your-repo \
 GH_PR_NUMBER=123 \
-npm run smoke:github-pr
+python scripts/github_smoke.py
 ```
 
 ## Безопасность

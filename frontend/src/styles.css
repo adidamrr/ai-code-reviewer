@@ -538,6 +538,104 @@ button:disabled {
   width: 100%;
 }
 
+.debug-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.debug-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.debug-item {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.debug-item.running {
+  border-color: rgba(37, 99, 235, 0.35);
+  background: linear-gradient(180deg, rgba(37, 99, 235, 0.06), rgba(14, 165, 160, 0.03));
+}
+
+.debug-item.done {
+  border-color: rgba(15, 118, 110, 0.3);
+}
+
+.debug-item.failed {
+  border-color: rgba(185, 28, 28, 0.3);
+}
+
+.debug-item-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.debug-item-title {
+  margin: 0;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.debug-item-meta {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.debug-item-body {
+  display: grid;
+  gap: 6px;
+}
+
+.debug-item-kv {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 10px;
+  align-items: center;
+  margin: 0;
+}
+
+.debug-item-kv span {
+  color: #2d3f59;
+  font-size: 0.82rem;
+}
+
+.debug-item-kv code {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  color: #22304a;
+  background: #f1f6ff;
+  border: 1px solid #d8e2ef;
+  border-radius: 10px;
+  padding: 6px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.debug-item-error {
+  margin: 6px 0 0;
+  color: var(--danger);
+  font-size: 0.85rem;
+}
+
+.debug-item-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
 .sync-inline-head h3 {
   margin: 0;
   font-size: 0.95rem;

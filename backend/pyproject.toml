@@ -1,0 +1,16 @@
+[project]
+name = "swagreviewer-backend"
+version = "0.2.0"
+description = "SWAGReviewer backend rewritten in Python/FastAPI"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115,<1.0",
+  "uvicorn[standard]>=0.30,<1.0",
+  "httpx>=0.27,<1.0",
+]
+
+[tool.uvicorn]
+factory = false
+app = "app.main:app"
+host = "0.0.0.0"
+port = 4000

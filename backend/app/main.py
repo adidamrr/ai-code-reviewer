@@ -1,0 +1,682 @@
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+from pathlib import Path
+from typing import Any
+
+import httpx
+from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from .config import AppConfig, load_config
+from .errors import HttpError
+from .github_session import GithubSessionStore
+from .pagination import paginate
+from .store import InMemoryStore
+
+API_PREFIXES = (
+    "/healthz",
+    "/readyz",
+    "/webhooks",
+    "/integrations",
+    "/github/session",
+    "/repos",
+    "/prs",
+    "/snapshots",
+    "/analysis-jobs",
+    "/comments",
+)
+EXCLUDED_AUTH_PREFIXES = ("/healthz", "/readyz", "/webhooks/github")
+
+
+def safe_compare(a: str, b: str) -> bool:
+    if len(a) != len(b):
+        return False
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+def is_api_path(pathname: str) -> bool:
+    return pathname.startswith(API_PREFIXES)
+
+
+def parse_scope(raw: Any) -> list[str]:
+    valid_scope = {"security", "style", "bugs", "performance"}
+    if not isinstance(raw, list) or len(raw) == 0:
+        return ["bugs"]
+
+    scope = [str(entry) for entry in raw]
+    invalid = next((entry for entry in scope if entry not in valid_scope), None)
+    if invalid:
+        raise HttpError(400, "validation_error", f"Unsupported scope value: {invalid}")
+
+    return scope
+
+
+def normalize_pr_state(value: Any) -> str:
+    if value == "closed":
+        return "closed"
+    if value == "all":
+        return "all"
+    return "open"
+
+
+def map_file_status(value: str) -> str:
+    if value in {"added", "removed", "renamed"}:
+        return value
+    return "modified"
+
+
+async def github_request(client: httpx.AsyncClient, token: str, url: str) -> Any:
+    response = await client.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "SWAGReviewer-Python",
+        },
+    )
+
+    text = response.text
+    try:
+        data = json.loads(text) if text else None
+    except json.JSONDecodeError:
+        data = None
+
+    if response.status_code >= 400:
+        message = data.get("message") if isinstance(data, dict) else response.reason_phrase
+        raise HttpError(
+            response.status_code,
+            "github_api_error",
+            f"GitHub API error: {message}",
+            {"url": url, "status": response.status_code},
+        )
+
+    return data
+
+
+async def fetch_user_repos(client: httpx.AsyncClient, token: str) -> list[dict[str, Any]]:
+    repos: list[dict[str, Any]] = []
+    for page in range(1, 11):
+        chunk = await github_request(client, token, f"https://api.github.com/user/repos?sort=updated&per_page=100&page={page}")
+        if not isinstance(chunk, list) or len(chunk) == 0:
+            break
+
+        repos.extend(chunk)
+        if len(chunk) < 100:
+            break
+
+    return repos
+
+
+async def fetch_pull_files(client: httpx.AsyncClient, token: str, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    for page in range(1, 21):
+        chunk = await github_request(
+            client,
+            token,
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files?per_page=100&page={page}",
+        )
+
+        if not isinstance(chunk, list) or len(chunk) == 0:
+            break
+
+        files.extend(chunk)
+        if len(chunk) < 100:
+            break
+
+    return files
+
+
+async def parse_json_body(request: Request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            return body
+        return {}
+    except Exception:
+        return {}
+
+
+def create_app(config: AppConfig) -> FastAPI:
+    app = FastAPI(title="SWAGReviewer Backend (Python)", version="1.0.0")
+    store = InMemoryStore()
+    github_sessions = GithubSessionStore()
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", "X-User-Id"],
+    )
+
+    @app.middleware("http")
+    async def service_token_auth(request: Request, call_next):  # type: ignore[override]
+        token = config.api_service_token
+        if not token:
+            return await call_next(request)
+
+        if request.url.path.startswith(EXCLUDED_AUTH_PREFIXES):
+            return await call_next(request)
+
+        authorization = request.headers.get("authorization")
+        expected = f"Bearer {token}"
+        if authorization != expected:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": {
+                        "code": "unauthorized",
+                        "message": "Invalid or missing service token",
+                    }
+                },
+            )
+
+        return await call_next(request)
+
+    @app.exception_handler(HttpError)
+    async def http_error_handler(_request: Request, error: HttpError):  # type: ignore[override]
+        payload: dict[str, Any] = {"code": error.code, "message": error.message}
+        if error.details is not None:
+            payload["details"] = error.details
+
+        return JSONResponse(status_code=error.status_code, content={"error": payload})
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(_request: Request, error: RequestValidationError):  # type: ignore[override]
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "code": "validation_error",
+                    "message": "Invalid request payload",
+                    "details": error.errors(),
+                }
+            },
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def starlette_error_handler(request: Request, error: StarletteHTTPException):  # type: ignore[override]
+        if error.status_code == 404:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "code": "not_found",
+                        "message": f"Route not found: {request.method} {request.url.path}",
+                    }
+                },
+            )
+
+        return JSONResponse(
+            status_code=error.status_code,
+            content={
+                "error": {
+                    "code": "http_error",
+                    "message": str(error.detail),
+                }
+            },
+        )
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/readyz")
+    async def readyz() -> dict[str, str]:
+        return {"status": "ready"}
+
+    @app.post("/webhooks/github", status_code=202)
+    async def github_webhook(request: Request) -> dict[str, Any]:
+        delivery_id = request.headers.get("x-github-delivery", "unknown")
+        event = request.headers.get("x-github-event", "unknown")
+
+        raw_body = await request.body()
+        if config.github_webhook_secret:
+            signature = request.headers.get("x-hub-signature-256")
+            if not signature:
+                raise HttpError(401, "signature_missing", "Missing x-hub-signature-256 header")
+
+            digest = "sha256=" + hmac.new(
+                config.github_webhook_secret.encode("utf-8"),
+                raw_body,
+                hashlib.sha256,
+            ).hexdigest()
+
+            if not safe_compare(signature, digest):
+                raise HttpError(401, "signature_invalid", "Invalid webhook signature")
+
+        return {
+            "received": True,
+            "event": event,
+            "deliveryId": delivery_id,
+            "processedAt": datetime_utc_iso(),
+        }
+
+    @app.post("/integrations/github/install", status_code=201)
+    async def github_install(request: Request) -> dict[str, Any]:
+        body = await parse_json_body(request)
+
+        try:
+            installation_id = int(body.get("installation_id"))
+        except Exception:
+            installation_id = -1
+
+        account_login = str(body.get("account_login") or "unknown-org")
+
+        if installation_id <= 0:
+            raise HttpError(400, "validation_error", "installation_id must be a positive number")
+
+        installation = store.upsert_github_installation(installation_id, account_login)
+        return {
+            "installation": {
+                "id": installation["id"],
+                "installationId": installation["installationId"],
+                "accountLogin": installation["accountLogin"],
+                "createdAt": installation["createdAt"],
+                "updatedAt": installation["updatedAt"],
+            }
+        }
+
+    @app.post("/github/session", status_code=201)
+    async def create_github_session(request: Request) -> dict[str, Any]:
+        body = await parse_json_body(request)
+        token = str(body.get("token") or "").strip()
+        if not token:
+            raise HttpError(400, "validation_error", "token is required")
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            user = await github_request(client, token, "https://api.github.com/user")
+
+        github_login = str(user.get("login") or "") if isinstance(user, dict) else ""
+        if not github_login:
+            raise HttpError(502, "github_api_error", "GitHub API error: Invalid /user response")
+
+        session = github_sessions.create(token, github_login)
+        return {
+            "sessionId": session["id"],
+            "githubLogin": session["githubLogin"],
+            "expiresAt": session["expiresAt"],
+        }
+
+    @app.get("/github/session/{session_id}")
+    async def get_github_session(session_id: str) -> dict[str, Any]:
+        session = github_sessions.get(session_id)
+        return {
+            "sessionId": session["id"],
+            "githubLogin": session["githubLogin"],
+            "expiresAt": session["expiresAt"],
+            "createdAt": session["createdAt"],
+        }
+
+    @app.delete("/github/session/{session_id}", status_code=204)
+    async def delete_github_session(session_id: str):
+        github_sessions.delete(session_id)
+        return Response(status_code=204)
+
+    @app.get("/github/session/{session_id}/repos")
+    async def github_session_repos(session_id: str, request: Request) -> dict[str, Any]:
+        session = github_sessions.get(session_id)
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            repos = await fetch_user_repos(client, session["token"])
+
+        normalized = []
+        for repo in repos:
+            if not isinstance(repo, dict):
+                continue
+
+            owner_info = repo.get("owner") or {}
+            owner_login = str(owner_info.get("login") or "unknown")
+            repo_name = str(repo.get("name") or "")
+            full_name = str(repo.get("full_name") or f"{owner_login}/{repo_name}")
+            default_branch = str(repo.get("default_branch") or "main")
+
+            backend_repo = store.upsert_repository(
+                {
+                    "owner": owner_login,
+                    "name": repo_name,
+                    "fullName": full_name,
+                    "defaultBranch": default_branch,
+                    "accountLogin": session["githubLogin"],
+                }
+            )
+
+            normalized.append(
+                {
+                    "repoId": backend_repo["id"],
+                    "providerRepoId": repo.get("id"),
+                    "owner": owner_login,
+                    "name": repo_name,
+                    "fullName": full_name,
+                    "defaultBranch": default_branch,
+                    "private": bool(repo.get("private", False)),
+                }
+            )
+
+        page = paginate(normalized, request.query_params.get("cursor"), request.query_params.get("limit"))
+        return {
+            "items": page["items"],
+            "nextCursor": page["nextCursor"],
+            "limit": page["limit"],
+        }
+
+    @app.get("/github/session/{session_id}/repos/{owner}/{repo}/prs")
+    async def github_session_prs(session_id: str, owner: str, repo: str, request: Request) -> dict[str, Any]:
+        session = github_sessions.get(session_id)
+        state = normalize_pr_state(request.query_params.get("state"))
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            prs = await github_request(
+                client,
+                session["token"],
+                f"https://api.github.com/repos/{owner}/{repo}/pulls?state={state}&per_page=100",
+            )
+
+        if not isinstance(prs, list):
+            prs = []
+
+        items = []
+        for pr in prs:
+            if not isinstance(pr, dict):
+                continue
+
+            base = pr.get("base") or {}
+            head = pr.get("head") or {}
+            user = pr.get("user") or {}
+
+            items.append(
+                {
+                    "number": pr.get("number"),
+                    "title": pr.get("title"),
+                    "state": pr.get("state"),
+                    "url": pr.get("html_url"),
+                    "authorLogin": user.get("login"),
+                    "baseSha": base.get("sha"),
+                    "headSha": head.get("sha"),
+                    "updatedAt": pr.get("updated_at"),
+                }
+            )
+
+        return {"items": items, "count": len(items)}
+
+    @app.post("/github/session/{session_id}/repos/{owner}/{repo}/prs/{pr_number}/sync")
+    async def github_session_sync(session_id: str, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+        if pr_number <= 0:
+            raise HttpError(400, "validation_error", "prNumber must be a positive integer")
+
+        session = github_sessions.get(session_id)
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            pr, files = await gather_pr_data(client, session["token"], owner, repo, pr_number)
+
+        backend_repo = store.upsert_repository(
+            {
+                "owner": owner,
+                "name": repo,
+                "fullName": f"{owner}/{repo}",
+                "defaultBranch": "main",
+                "accountLogin": session["githubLogin"],
+            }
+        )
+
+        sync_result = store.sync_pull_request(
+            backend_repo["id"],
+            int(pr.get("number") or pr_number),
+            {
+                "title": pr.get("title"),
+                "state": "open" if pr.get("state") == "open" else "closed",
+                "authorLogin": (pr.get("user") or {}).get("login"),
+                "url": pr.get("html_url"),
+                "baseSha": (pr.get("base") or {}).get("sha"),
+                "headSha": (pr.get("head") or {}).get("sha"),
+                "commitSha": (pr.get("head") or {}).get("sha"),
+                "files": [
+                    {
+                        "path": file.get("filename"),
+                        "status": map_file_status(str(file.get("status") or "modified")),
+                        "patch": file.get("patch") or "",
+                        "additions": file.get("additions"),
+                        "deletions": file.get("deletions"),
+                    }
+                    for file in files[:500]
+                    if isinstance(file, dict)
+                ],
+            },
+        )
+
+        return {
+            "repoId": backend_repo["id"],
+            "prId": sync_result["pr"]["id"],
+            "snapshotId": sync_result["snapshot"]["id"],
+            "counts": sync_result["counts"],
+            "idempotent": sync_result["idempotent"],
+            "source": "github_session",
+        }
+
+    @app.get("/repos")
+    async def list_repos(request: Request) -> dict[str, Any]:
+        page = store.list_repos(request.query_params.get("cursor"), request.query_params.get("limit"))
+        return {"items": page["items"], "nextCursor": page["nextCursor"], "limit": page["limit"]}
+
+    @app.get("/repos/{repo_id}/runs")
+    async def list_repo_runs(repo_id: str, request: Request) -> dict[str, Any]:
+        page = store.list_repo_runs(repo_id, request.query_params.get("cursor"), request.query_params.get("limit"))
+        return {"items": page["items"], "nextCursor": page["nextCursor"], "limit": page["limit"]}
+
+    @app.post("/repos/{repo_id}/prs/{pr_number}/sync")
+    async def sync_pr(repo_id: str, pr_number: int, request: Request) -> dict[str, Any]:
+        if pr_number <= 0:
+            raise HttpError(400, "validation_error", "prNumber must be a positive integer")
+
+        body = await parse_json_body(request)
+        sync_result = store.sync_pull_request(repo_id, pr_number, body)
+
+        return {
+            "prId": sync_result["pr"]["id"],
+            "snapshotId": sync_result["snapshot"]["id"],
+            "counts": sync_result["counts"],
+            "idempotent": sync_result["idempotent"],
+        }
+
+    @app.get("/prs/{pr_id}")
+    async def get_pr(pr_id: str) -> dict[str, Any]:
+        pr = store.get_pr(pr_id)
+        latest_snapshot = store.get_snapshot(pr["latestSnapshotId"])["snapshot"] if pr.get("latestSnapshotId") else None
+        return {"pr": pr, "latestSnapshot": latest_snapshot}
+
+    @app.get("/prs/{pr_id}/files")
+    async def get_pr_files(pr_id: str, request: Request) -> dict[str, Any]:
+        page = store.list_pr_files(pr_id, request.query_params.get("cursor"), request.query_params.get("limit"))
+        return {"items": page["items"], "nextCursor": page["nextCursor"], "limit": page["limit"]}
+
+    @app.get("/prs/{pr_id}/diff")
+    async def get_pr_diff(pr_id: str, request: Request) -> dict[str, Any]:
+        file_path = request.query_params.get("file")
+        items = store.get_pr_diff(pr_id, file_path)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/prs/{pr_id}/snapshots")
+    async def get_pr_snapshots(pr_id: str) -> dict[str, Any]:
+        items = store.list_pr_snapshots(pr_id)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/snapshots/{snapshot_id}")
+    async def get_snapshot(snapshot_id: str) -> dict[str, Any]:
+        result = store.get_snapshot(snapshot_id)
+        return {
+            "snapshot": result["snapshot"],
+            "files": result["files"],
+            "counts": {
+                "files": len(result["files"]),
+                "additions": result["snapshot"]["additions"],
+                "deletions": result["snapshot"]["deletions"],
+            },
+        }
+
+    @app.post("/prs/{pr_id}/analysis-jobs", status_code=201)
+    async def create_analysis_job(pr_id: str, request: Request) -> dict[str, Any]:
+        body = await parse_json_body(request)
+        snapshot_id = str(body.get("snapshotId") or "")
+        if not snapshot_id:
+            raise HttpError(400, "validation_error", "snapshotId is required")
+
+        try:
+            max_comments = int(body.get("maxComments") or 50)
+        except Exception:
+            max_comments = -1
+
+        if max_comments <= 0:
+            raise HttpError(400, "validation_error", "maxComments must be a positive number")
+
+        scope = parse_scope(body.get("scope"))
+        files = [str(item) for item in body.get("files", [])] if isinstance(body.get("files"), list) else None
+
+        job = await store.create_analysis_job(
+            pr_id,
+            {
+                "snapshotId": snapshot_id,
+                "scope": scope,
+                "files": files,
+                "maxComments": max_comments,
+            },
+        )
+
+        return {
+            "jobId": job["id"],
+            "status": job["status"],
+            "progress": job["progress"],
+        }
+
+    @app.get("/prs/{pr_id}/analysis-jobs")
+    async def list_analysis_jobs(pr_id: str, request: Request) -> dict[str, Any]:
+        page = store.list_pr_analysis_jobs(pr_id, request.query_params.get("cursor"), request.query_params.get("limit"))
+        return {"items": page["items"], "nextCursor": page["nextCursor"], "limit": page["limit"]}
+
+    @app.get("/analysis-jobs/{job_id}")
+    async def get_analysis_job(job_id: str) -> dict[str, Any]:
+        return store.get_job(job_id)
+
+    @app.post("/analysis-jobs/{job_id}/cancel")
+    async def cancel_analysis_job(job_id: str) -> dict[str, Any]:
+        return store.cancel_job(job_id)
+
+    @app.get("/analysis-jobs/{job_id}/results")
+    async def get_analysis_results(job_id: str, request: Request) -> dict[str, Any]:
+        page = store.list_job_suggestions(job_id, request.query_params.get("cursor"), request.query_params.get("limit"))
+        return {"items": page["items"], "nextCursor": page["nextCursor"], "limit": page["limit"]}
+
+    @app.get("/analysis-jobs/{job_id}/events")
+    async def get_analysis_events(job_id: str, request: Request) -> dict[str, Any]:
+        page = store.list_job_events(job_id, request.query_params.get("cursor"), request.query_params.get("limit"))
+        return {"items": page["items"], "nextCursor": page["nextCursor"], "limit": page["limit"]}
+
+    @app.post("/prs/{pr_id}/publish")
+    async def publish(pr_id: str, request: Request) -> dict[str, Any]:
+        body = await parse_json_body(request)
+        job_id = str(body.get("jobId") or "")
+        if not job_id:
+            raise HttpError(400, "validation_error", "jobId is required")
+
+        mode = str(body.get("mode") or "review_comments")
+        if mode not in {"review_comments", "issue_comments"}:
+            raise HttpError(400, "validation_error", "mode must be review_comments or issue_comments")
+
+        dry_run = bool(body.get("dryRun"))
+        result = store.publish(pr_id, job_id, mode, dry_run)
+        return {
+            "publishRunId": result["publishRunId"],
+            "publishedCount": result["publishedCount"],
+            "errors": result["errors"],
+            "comments": result["comments"],
+            "idempotent": result["idempotent"],
+        }
+
+    @app.get("/prs/{pr_id}/comments")
+    async def get_pr_comments(pr_id: str, request: Request) -> dict[str, Any]:
+        page = store.list_pr_comments(pr_id, request.query_params.get("cursor"), request.query_params.get("limit"))
+        return {"items": page["items"], "nextCursor": page["nextCursor"], "limit": page["limit"]}
+
+    @app.put("/comments/{comment_id}/feedback")
+    async def upsert_feedback(comment_id: str, request: Request) -> dict[str, Any]:
+        body = await parse_json_body(request)
+        vote = str(body.get("vote") or "")
+        if vote not in {"up", "down"}:
+            raise HttpError(400, "validation_error", "vote must be up or down")
+
+        user_id = str(body.get("userId") or request.headers.get("x-user-id") or "anonymous")
+        reason = str(body["reason"]) if body.get("reason") else None
+
+        return store.upsert_feedback(comment_id, user_id, vote, reason)
+
+    @app.get("/comments/{comment_id}/feedback")
+    async def get_comment_feedback(comment_id: str) -> dict[str, Any]:
+        result = store.get_comment_feedback(comment_id)
+        return {
+            "comment": result["comment"],
+            "votes": result["votes"],
+            "totals": result["totals"],
+        }
+
+    @app.get("/prs/{pr_id}/feedback-summary")
+    async def get_feedback_summary(pr_id: str) -> dict[str, Any]:
+        return store.get_pr_feedback_summary(pr_id)
+
+    frontend_dist = config.frontend_dist_path
+    index_file = (frontend_dist / "index.html") if frontend_dist else None
+
+    if config.serve_frontend and frontend_dist and index_file and index_file.exists():
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def frontend_catch_all(full_path: str):
+            pathname = f"/{full_path}"
+            if is_api_path(pathname):
+                raise HttpError(404, "not_found", f"Route not found: GET {pathname}")
+
+            requested_file = (frontend_dist / full_path).resolve()
+            if full_path and requested_file.is_file() and _is_inside(frontend_dist, requested_file):
+                return FileResponse(requested_file)
+
+            return FileResponse(index_file)
+
+    return app
+
+
+async def gather_pr_data(client: httpx.AsyncClient, token: str, owner: str, repo: str, pr_number: int):
+    pr = await github_request(client, token, f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}")
+    files = await fetch_pull_files(client, token, owner, repo, pr_number)
+
+    if not isinstance(pr, dict):
+        raise HttpError(502, "github_api_error", "GitHub API error: invalid pull request payload")
+
+    return pr, files
+
+
+def datetime_utc_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _is_inside(base: Path, candidate: Path) -> bool:
+    try:
+        candidate.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
+app = create_app(load_config())
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    cfg = load_config()
+    uvicorn.run("app.main:app", host="0.0.0.0", port=cfg.port, reload=False)

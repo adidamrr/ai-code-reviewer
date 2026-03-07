@@ -9,6 +9,7 @@ export function ReposPage() {
     repos,
     repoCursor,
     selectedRepoId,
+    debugSuite,
     busy,
     actions,
     getRepoStatus,
@@ -109,6 +110,72 @@ export function ReposPage() {
           {filtered.length === 0 ? (
             <div className="empty-block">Ничего не найдено. Измени фильтры или обнови список.</div>
           ) : null}
+        </div>
+      </section>
+
+      <section className="card stack-gap">
+        <div className="debug-head">
+          <div>
+            <h2>Debug suite (фиксированные PR)</h2>
+            <p className="subline">
+              Автоматически прогоняет sync + analysis job на 3 заранее заданных PR для воспроизводимых экспериментов.
+              {" "}
+              Настройка: <code>frontend/src/debug/presets.ts</code>
+            </p>
+          </div>
+          <button className="primary-btn" onClick={() => actions.runDebugSuite()} disabled={busy || debugSuite.running}>
+            {debugSuite.running ? "Выполняется..." : "Запустить debug"}
+          </button>
+        </div>
+
+        <div className="debug-grid">
+          {debugSuite.items.map((item) => (
+            <article key={item.presetId} className={`debug-item ${item.status}`}>
+              <div className="debug-item-top">
+                <div>
+                  <p className="debug-item-title">{item.label}</p>
+                  <p className="debug-item-meta">
+                    {item.owner}/{item.repo}#{item.prNumber}
+                  </p>
+                </div>
+                <span className={`status-badge ${item.status === "done" ? "ok" : item.status === "failed" ? "warn" : "muted"}`}>
+                  {item.status === "pending" ? "ожидает" : item.status === "running" ? "running" : item.status === "done" ? "done" : "failed"}
+                </span>
+              </div>
+
+              <div className="debug-item-body">
+                <p className="debug-item-kv">
+                  <span>repoId</span>
+                  <code>{item.repoId ?? "-"}</code>
+                </p>
+                <p className="debug-item-kv">
+                  <span>jobId</span>
+                  <code>{item.jobId ?? "-"}</code>
+                </p>
+                <p className="debug-item-kv">
+                  <span>suggestions</span>
+                  <code>{item.suggestions ?? "-"}</code>
+                </p>
+                {item.error ? <p className="debug-item-error">{item.error}</p> : null}
+              </div>
+
+              <div className="debug-item-actions">
+                <button
+                  className="secondary-btn"
+                  disabled={!item.repoId}
+                  onClick={() => {
+                    if (!item.repoId) {
+                      return;
+                    }
+                    actions.selectRepo(item.repoId);
+                    navigate(`/repos/${item.repoId}/workspace`);
+                  }}
+                >
+                  Открыть workspace
+                </button>
+              </div>
+            </article>
+          ))}
         </div>
       </section>
     </div>

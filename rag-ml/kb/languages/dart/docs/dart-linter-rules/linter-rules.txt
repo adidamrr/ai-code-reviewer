@@ -1,0 +1,2703 @@
+Linter rules
+Skip to main content
+dart.dev uses cookies from Google to deliver and enhance the quality of its services and to analyze traffic.
+Learn more
+OK, got it
+Dart
+Overview
+Docs
+Blog
+Community
+Learn
+Try Dart
+Get Dart
+search
+routine
+light_mode
+Light
+dark_mode
+Dark
+night_sight_auto
+Automatic
+apps
+Dart
+Dart
+API
+Dart
+Blog
+DartPad
+pub.dev
+menu
+close
+asterisk
+Overview
+docs
+Docs
+newsmode
+Blog
+public
+Community
+code_blocks
+Try Dart
+download
+Get Dart
+Language
+expand_more
+Introduction
+Variables
+Operators
+Comments
+Types
+expand_more
+Built-in types
+Records
+Collections
+Generics
+Typedefs
+Type system
+Patterns
+expand_more
+Overview & usage
+Pattern types
+Applied tutorial
+open_in_new
+Control flow
+expand_more
+Loops
+Branches
+Error handling
+Functions
+Metadata
+Libraries & imports
+Classes & objects
+expand_more
+Classes
+Constructors
+Methods
+Extend a class
+Mixins
+Enums
+Dot shorthands
+Extension methods
+Extension types
+Callable objects
+Class modifiers
+expand_more
+Overview & usage
+Class modifiers for API maintainers
+Reference
+Concurrency
+expand_more
+Overview
+Asynchronous programming
+Isolates
+Null safety
+expand_more
+Sound null safety
+Understanding null safety
+Dart keywords
+Language versioning
+Core libraries
+expand_more
+Overview
+dart:core
+dart:async
+dart:math
+dart:convert
+dart:io
+dart:js_interop
+Iterable collections
+Asynchronous programming
+expand_more
+Tutorial
+Futures and error handling
+Using streams
+Creating streams
+Effective Dart
+expand_more
+Overview
+Style
+Documentation
+Usage
+Design
+Packages
+expand_more
+How to use packages
+Commonly used packages
+Creating packages
+Publishing packages
+Writing package pages
+Workspaces (monorepo support)
+Hooks
+Package reference
+expand_more
+Dependencies
+Package layout conventions
+Pub environment variables
+Pubspec file
+Troubleshooting pub
+Verified publishers
+Security advisories
+Versioning
+Custom package repositories
+What not to commit
+Development
+expand_more
+JSON serialization
+Number representation
+Google APIs
+Multi-platform apps
+Command-line & server apps
+expand_more
+Overview
+Fetch data from the internet
+Libraries & packages
+Google Cloud
+Web apps
+expand_more
+Overview
+Get started
+Deployment
+Libraries & packages
+Wasm compilation
+Environment declarations
+Interoperability
+expand_more
+C interop
+Objective-C & Swift interop
+Java & Kotlin interop
+JavaScript interop
+expand_more
+Overview
+Usage
+JS types
+Tutorials
+Past JS interop
+Web interop
+Tools & techniques
+expand_more
+Overview
+AI
+expand_more
+Dart and Flutter MCP Server
+open_in_new
+Editors & debuggers
+expand_more
+IntelliJ & Android Studio
+VS Code
+Troubleshoot analyzer performance
+Dart DevTools
+DartPad
+expand_more
+Overview
+Troubleshooting DartPad
+Command-line tools
+expand_more
+Dart SDK
+expand_more
+Overview
+dart
+dart analyze
+dart build
+dart compile
+dart create
+dart doc
+dart fix
+dart format
+dart info
+dart install
+dart pub
+dart run
+dart test
+dartaotruntime
+Experiment flags
+Other command-line tools
+expand_more
+build_runner
+webdev
+Static analysis
+expand_more
+Customizing static analysis
+Fixing type promotion failures
+Linter rules
+Analyzer plugins
+Diagnostic messages
+Testing & optimization
+expand_more
+Testing
+Debugging web apps
+Learn Dart
+expand_more
+Overview
+Tutorial
+Stay up to date
+expand_more
+Dart Blog
+open_in_new
+Changelog
+What's new in the docs
+Resources
+expand_more
+Language cheatsheet
+Language specification
+Dart 3 migration guide
+Glossary
+Books
+Videos
+Related sites
+expand_more
+API reference
+open_in_new
+DartPad (online editor)
+open_in_new
+Flutter
+open_in_new
+Package site
+open_in_new
+list
+On this page
+chevron_right
+Linter rules
+vertical_align_top
+Linter rules
+Sets
+Status
+Quick fixes
+Rules
+Dart 3.11 is live!
+Learn more
+list
+On this page
+Sets
+Status
+Quick fixes
+Rules
+Tools
+chevron_right
+Linter rules
+Linter rules
+Details about the Dart linter and its style rules you can choose.
+more_vert
+copy
+Copy link
+docs
+View source
+bug_report
+Report issue
+Use the Dart linter to identify possible problems in your Dart code. You can use the linter through your IDE or with the
+dart analyze
+command. For information on how to enable and disable individual linter rules, see
+individual rules sections
+of the
+analyzer documentation
+.
+This page lists all the linter rules, with details such as when you might want to use each rule, what code patterns trigger it, and how you might fix your code.
+lightbulb
+Tip
+Linter rules (sometimes called
+lints
+) can have false positives, and they don't all agree with each other. For example, some rules are more appropriate for regular Dart packages, and others are designed for Flutter apps.
+Sets
+#
+To avoid the need to individually select compatible linter rules, consider starting with a linter rule set, which the following packages provide:
+lints
+Contains two rule sets curated by the Dart team. We recommend using at least the
+core
+rule set, which is used when
+scoring
+packages uploaded to
+pub.dev
+. Or, better yet, use the
+recommended
+rule set, a superset of
+core
+that identifies additional issues and enforces style and format. If you're writing Flutter code, use the rule set in the
+flutter_lints
+package, which builds on
+lints
+.
+flutter_lints
+Contains the
+flutter
+rule set, which the Flutter team encourages you to use in Flutter apps, packages, and plugins. This rule set is a superset of the
+recommended
+set, which is itself a superset of the
+core
+set that partially determines the
+score
+of packages uploaded to
+pub.dev
+.
+To learn how to use a specific rule set, visit the documentation for
+enabling and disabling linter rules
+.
+To find more predefined rule sets, check out the
+#lints
+topic
+on pub.dev.
+Status
+#
+Each rule has a status or maturity level:
+Stable
+These rules are safe to use and are verified as functional with the latest versions of the Dart language. All rules are considered stable unless they're marked as experimental, deprecated, or removed.
+Experimental
+These rules are still under evaluation and might never be stabilized. Use these with caution and report any issues you come across.
+Deprecated
+These rules are no longer suggested for use and might be removed in a future Dart release.
+Removed
+These rules have already been removed in the latest stable Dart release.
+Quick fixes
+#
+Some rules can be fixed automatically using quick fixes. A quick fix is an automated edit targeted at fixing the issue reported by the linter rule.
+If the rule has a quick fix, it can be applied using
+dart fix
+or using your
+editor with Dart support
+. To learn more, see
+Quick fixes for analysis issues
+.
+Rules
+#
+The following is an index of all linter rules and a short description of their functionality. To learn more about a specific rule, click the
+Learn more
+button on its card.
+For an auto-generated list containing all linter rules in Dart
+3.11.0
+, check out
+All linter rules
+.
+search
+Rule set
+flutter
+Flutter
+thumb_up
+Recommended
+circles
+Core
+Fix available
+Stable only
+Clear filters
+always_
+declare_
+return_
+types
+Declare method return types.
+build
+Learn more
+Copy name
+always_
+put_
+control_
+body_
+on_
+new_
+line
+Separate the control structure expression from its statement.
+build
+Learn more
+Copy name
+always_
+put_
+required_
+named_
+parameters_
+first
+Put required named parameters first.
+build
+Learn more
+Copy name
+always_
+require_
+non_
+null_
+named_
+parameters
+Specify
+@required
+on named parameters without defaults.
+error
+Learn more
+Copy name
+always_
+specify_
+types
+Specify type annotations.
+build
+Learn more
+Copy name
+always_
+use_
+package_
+imports
+Avoid relative imports for files in
+lib/
+.
+build
+Learn more
+Copy name
+annotate_
+overrides
+Annotate overridden members.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+annotate_
+redeclares
+Annotate redeclared members.
+science
+build
+Learn more
+Copy name
+avoid_
+annotating_
+with_
+dynamic
+Avoid annotating with
+dynamic
+when not required.
+build
+Learn more
+Copy name
+avoid_
+as
+Avoid using
+as
+.
+error
+Learn more
+Copy name
+avoid_
+bool_
+literals_
+in_
+conditional_
+expressions
+Avoid
+bool
+literals in conditional expressions.
+build
+Learn more
+Copy name
+avoid_
+catches_
+without_
+on_
+clauses
+Avoid catches without on clauses.
+Learn more
+Copy name
+avoid_
+catching_
+errors
+Don't explicitly catch
+Error
+or types that implement it.
+Learn more
+Copy name
+avoid_
+classes_
+with_
+only_
+static_
+members
+Avoid defining a class that contains only static members.
+Learn more
+Copy name
+avoid_
+double_
+and_
+int_
+checks
+Avoid
+double
+and
+int
+checks.
+Learn more
+Copy name
+avoid_
+dynamic_
+calls
+Avoid method calls or property accesses on a
+dynamic
+target.
+Learn more
+Copy name
+avoid_
+empty_
+else
+Avoid empty statements in else clauses.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+avoid_
+equals_
+and_
+hash_
+code_
+on_
+mutable_
+classes
+Avoid overloading operator == and hashCode on classes not marked
+@immutable
+.
+Learn more
+Copy name
+avoid_
+escaping_
+inner_
+quotes
+Avoid escaping inner quotes by converting surrounding quotes.
+build
+Learn more
+Copy name
+avoid_
+field_
+initializers_
+in_
+const_
+classes
+Avoid field initializers in const classes.
+Learn more
+Copy name
+avoid_
+final_
+parameters
+Avoid
+final
+for parameter declarations.
+build
+Learn more
+Copy name
+avoid_
+function_
+literals_
+in_
+foreach_
+calls
+Avoid using
+forEach
+with a function literal.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+avoid_
+futureor_
+void
+Avoid using 'FutureOr
+' as the type of a result.
+science
+Learn more
+Copy name
+avoid_
+implementing_
+value_
+types
+Don't implement classes that override
+==
+.
+Learn more
+Copy name
+avoid_
+init_
+to_
+null
+Don't explicitly initialize variables to
+null
+.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+avoid_
+js_
+rounded_
+ints
+Avoid JavaScript rounded ints.
+Learn more
+Copy name
+avoid_
+multiple_
+declarations_
+per_
+line
+Don't declare multiple variables on a single line.
+build
+Learn more
+Copy name
+avoid_
+null_
+checks_
+in_
+equality_
+operators
+Don't check for
+null
+in custom
+==
+operators.
+report
+build
+Learn more
+Copy name
+avoid_
+positional_
+boolean_
+parameters
+Avoid positional boolean parameters.
+Learn more
+Copy name
+avoid_
+print
+Avoid
+print
+calls in production code.
+build
+flutter
+Learn more
+Copy name
+avoid_
+private_
+typedef_
+functions
+Avoid private typedef functions.
+build
+Learn more
+Copy name
+avoid_
+redundant_
+argument_
+values
+Avoid redundant argument values.
+build
+Learn more
+Copy name
+avoid_
+relative_
+lib_
+imports
+Avoid relative imports for files in
+lib/
+.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+avoid_
+renaming_
+method_
+parameters
+Don't rename parameters of overridden methods.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+avoid_
+return_
+types_
+on_
+setters
+Avoid return types on setters.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+avoid_
+returning_
+null
+Avoid returning null from members whose return type is bool, double, int, or num.
+error
+Learn more
+Copy name
+avoid_
+returning_
+null_
+for_
+future
+Avoid returning null for Future.
+error
+Learn more
+Copy name
+avoid_
+returning_
+null_
+for_
+void
+Avoid returning
+null
+for
+void
+.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+avoid_
+returning_
+this
+Avoid returning this from methods just to enable a fluent interface.
+Learn more
+Copy name
+avoid_
+setters_
+without_
+getters
+Avoid setters without getters.
+Learn more
+Copy name
+avoid_
+shadowing_
+type_
+parameters
+Avoid shadowing type parameters.
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+avoid_
+single_
+cascade_
+in_
+expression_
+statements
+Avoid single cascade in expression statements.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+avoid_
+slow_
+async_
+io
+Avoid slow asynchronous
+dart:io
+methods.
+Learn more
+Copy name
+avoid_
+type_
+to_
+string
+Avoid
+.toString() in production code since results may be minified.
+Learn more
+Copy name
+avoid_
+types_
+as_
+parameter_
+names
+Avoid types as parameter names.
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+avoid_
+types_
+on_
+closure_
+parameters
+Avoid annotating types for function expression parameters.
+build
+Learn more
+Copy name
+avoid_
+unnecessary_
+containers
+Avoid unnecessary containers.
+build
+flutter
+Learn more
+Copy name
+avoid_
+unstable_
+final_
+fields
+Avoid overriding a final field to return different values if called multiple times.
+error
+Learn more
+Copy name
+avoid_
+unused_
+constructor_
+parameters
+Avoid defining unused parameters in constructors.
+build
+Learn more
+Copy name
+avoid_
+void_
+async
+Avoid
+async
+functions that return
+void
+.
+build
+Learn more
+Copy name
+avoid_
+web_
+libraries_
+in_
+flutter
+Avoid using web-only libraries outside Flutter web plugin packages.
+flutter
+Learn more
+Copy name
+await_
+only_
+futures
+Await only futures.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+camel_
+case_
+extensions
+Name extensions using UpperCamelCase.
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+camel_
+case_
+types
+Name types using UpperCamelCase.
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+cancel_
+subscriptions
+Cancel instances of
+dart:async
+StreamSubscription
+.
+Learn more
+Copy name
+cascade_
+invocations
+Cascade consecutive method invocations on the same reference.
+build
+Learn more
+Copy name
+cast_
+nullable_
+to_
+non_
+nullable
+Don't cast a nullable value to a non nullable type.
+build
+Learn more
+Copy name
+close_
+sinks
+Close instances of
+dart:core
+Sink
+.
+Learn more
+Copy name
+collection_
+methods_
+unrelated_
+type
+Invocation of various collection methods with arguments of unrelated types.
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+combinators_
+ordering
+Sort combinator names alphabetically.
+build
+Learn more
+Copy name
+comment_
+references
+Only reference in-scope identifiers in doc comments.
+build
+Learn more
+Copy name
+conditional_
+uri_
+does_
+not_
+exist
+Missing conditional import.
+Learn more
+Copy name
+constant_
+identifier_
+names
+Prefer using lowerCamelCase for constant names.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+control_
+flow_
+in_
+finally
+Avoid control flow in
+finally
+blocks.
+thumb_up
+flutter
+Learn more
+Copy name
+curly_
+braces_
+in_
+flow_
+control_
+structures
+DO use curly braces for all flow control structures.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+dangling_
+library_
+doc_
+comments
+Attach library doc comments to library directives.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+depend_
+on_
+referenced_
+packages
+Depend on referenced packages.
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+deprecated_
+consistency
+Missing deprecated annotation.
+Learn more
+Copy name
+deprecated_
+member_
+use_
+from_
+same_
+package
+Avoid using deprecated elements from within the package in which they are declared.
+build
+Learn more
+Copy name
+diagnostic_
+describe_
+all_
+properties
+DO reference all public properties in debug methods.
+build
+Learn more
+Copy name
+directives_
+ordering
+Adhere to Effective Dart Guide directives sorting conventions.
+build
+Learn more
+Copy name
+discarded_
+futures
+There should be no
+Future
+-returning calls in synchronous functions unless they are assigned or returned.
+build
+Learn more
+Copy name
+do_
+not_
+use_
+environment
+Do not use environment declared variables.
+Learn more
+Copy name
+document_
+ignores
+Document ignore comments.
+Learn more
+Copy name
+empty_
+catches
+Avoid empty catch blocks.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+empty_
+constructor_
+bodies
+Use
+;
+instead of
+{}
+for empty constructor bodies.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+empty_
+statements
+Avoid empty statements.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+enable_
+null_
+safety
+Do use sound null safety.
+error
+Learn more
+Copy name
+eol_
+at_
+end_
+of_
+file
+Put a single newline at end of file.
+build
+Learn more
+Copy name
+exhaustive_
+cases
+Define case clauses for all constants in enum-like classes.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+file_
+names
+Name source files using
+lowercase_with_underscores
+.
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+flutter_
+style_
+todos
+Use Flutter TODO format: // TODO(username): message, https://URL-to-issue.
+build
+Learn more
+Copy name
+hash_
+and_
+equals
+Always override
+hashCode
+if overriding
+==
+.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+implementation_
+imports
+Don't import implementation files from another package.
+thumb_up
+flutter
+Learn more
+Copy name
+implicit_
+call_
+tearoffs
+Explicitly tear-off
+call
+methods when using an object as a Function.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+implicit_
+reopen
+Don't implicitly reopen classes.
+science
+build
+Learn more
+Copy name
+invalid_
+case_
+patterns
+Use case expressions that are valid in Dart 3.0.
+science
+build
+Learn more
+Copy name
+invalid_
+runtime_
+check_
+with_
+js_
+interop_
+types
+Avoid runtime type tests with JS interop types where the result may not be platform-consistent.
+thumb_up
+flutter
+Learn more
+Copy name
+invariant_
+booleans
+Conditions should not unconditionally evaluate to
+true
+or to
+false
+.
+error
+Learn more
+Copy name
+iterable_
+contains_
+unrelated_
+type
+Invocation of
+Iterable<E>.contains
+with references of unrelated types.
+error
+Learn more
+Copy name
+join_
+return_
+with_
+assignment
+Join return statement with assignment when possible.
+Learn more
+Copy name
+leading_
+newlines_
+in_
+multiline_
+strings
+Start multiline strings with a newline.
+build
+Learn more
+Copy name
+library_
+annotations
+Attach library annotations to library directives.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+library_
+names
+Name libraries using
+lowercase_with_underscores
+.
+Learn more
+Copy name
+library_
+prefixes
+Use
+lowercase_with_underscores
+when specifying a library prefix.
+thumb_up
+flutter
+Learn more
+Copy name
+library_
+private_
+types_
+in_
+public_
+api
+Avoid using private types in public APIs.
+thumb_up
+flutter
+Learn more
+Copy name
+lines_
+longer_
+than_
+80_
+chars
+Avoid lines longer than 80 characters.
+Learn more
+Copy name
+list_
+remove_
+unrelated_
+type
+Invocation of
+remove
+with references of unrelated types.
+error
+Learn more
+Copy name
+literal_
+only_
+boolean_
+expressions
+Boolean expression composed only with literals.
+Learn more
+Copy name
+matching_
+super_
+parameters
+Use matching super parameter names.
+Learn more
+Copy name
+missing_
+code_
+block_
+language_
+in_
+doc_
+comment
+A code block is missing a specified language.
+Learn more
+Copy name
+missing_
+whitespace_
+between_
+adjacent_
+strings
+Missing whitespace between adjacent strings.
+Learn more
+Copy name
+no_
+adjacent_
+strings_
+in_
+list
+Don't use adjacent strings in list.
+Learn more
+Copy name
+no_
+default_
+cases
+No default cases.
+science
+Learn more
+Copy name
+no_
+duplicate_
+case_
+values
+Don't use more than one case with same value.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+no_
+leading_
+underscores_
+for_
+library_
+prefixes
+Avoid leading underscores for library prefixes.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+no_
+leading_
+underscores_
+for_
+local_
+identifiers
+Avoid leading underscores for local identifiers.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+no_
+literal_
+bool_
+comparisons
+Don't compare boolean expressions to boolean literals.
+build
+Learn more
+Copy name
+no_
+logic_
+in_
+create_
+state
+Don't put any logic in createState.
+flutter
+Learn more
+Copy name
+no_
+runtimetype_
+tostring
+Avoid calling
+toString()
+on
+runtimeType
+.
+Learn more
+Copy name
+no_
+self_
+assignments
+Don't assign a variable to itself.
+Learn more
+Copy name
+no_
+wildcard_
+variable_
+uses
+Don't use wildcard parameters or variables.
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+non_
+constant_
+identifier_
+names
+Name non-constant identifiers using lowerCamelCase.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+noop_
+primitive_
+operations
+Noop primitive operations.
+build
+Learn more
+Copy name
+null_
+check_
+on_
+nullable_
+type_
+parameter
+Don't use
+null
+check on a potentially nullable type parameter.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+null_
+closures
+Do not pass
+null
+as an argument where a closure is expected.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+omit_
+local_
+variable_
+types
+Omit type annotations for local variables.
+build
+Learn more
+Copy name
+omit_
+obvious_
+local_
+variable_
+types
+Omit obvious type annotations for local variables.
+science
+build
+Learn more
+Copy name
+omit_
+obvious_
+property_
+types
+Omit obvious type annotations for top-level and static variables.
+science
+build
+Learn more
+Copy name
+one_
+member_
+abstracts
+Avoid defining a one-member abstract class when a simple function will do.
+Learn more
+Copy name
+only_
+throw_
+errors
+Only throw instances of classes extending either Exception or Error.
+Learn more
+Copy name
+overridden_
+fields
+Don't override fields.
+thumb_up
+flutter
+Learn more
+Copy name
+package_
+api_
+docs
+Provide doc comments for all public APIs.
+error
+Learn more
+Copy name
+package_
+names
+Use
+lowercase_with_underscores
+for package names.
+thumb_up
+flutter
+Learn more
+Copy name
+package_
+prefixed_
+library_
+names
+Prefix library names with the package name and a dot-separated path.
+Learn more
+Copy name
+parameter_
+assignments
+Don't reassign references to parameters of functions or methods.
+Learn more
+Copy name
+prefer_
+adjacent_
+string_
+concatenation
+Use adjacent strings to concatenate string literals.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+asserts_
+in_
+initializer_
+lists
+Prefer putting asserts in initializer lists.
+Learn more
+Copy name
+prefer_
+asserts_
+with_
+message
+Prefer asserts with message.
+Learn more
+Copy name
+prefer_
+bool_
+in_
+asserts
+Prefer using a boolean as the assert condition.
+error
+Learn more
+Copy name
+prefer_
+collection_
+literals
+Use collection literals when possible.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+conditional_
+assignment
+Prefer using
+??=
+over testing for
+null
+.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+const_
+constructors
+Prefer
+const
+with constant constructors.
+build
+Learn more
+Copy name
+prefer_
+const_
+constructors_
+in_
+immutables
+Prefer declaring
+const
+constructors on
+@immutable
+classes.
+build
+flutter
+Learn more
+Copy name
+prefer_
+const_
+declarations
+Prefer
+const
+over
+final
+for declarations.
+build
+Learn more
+Copy name
+prefer_
+const_
+literals_
+to_
+create_
+immutables
+Prefer const literals as parameters of constructors on @immutable classes.
+build
+Learn more
+Copy name
+prefer_
+constructors_
+over_
+static_
+methods
+Prefer defining constructors instead of static methods to create instances.
+Learn more
+Copy name
+prefer_
+contains
+Use contains for
+List
+and
+String
+instances.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+double_
+quotes
+Prefer double quotes where they won't require escape sequences.
+build
+Learn more
+Copy name
+prefer_
+equal_
+for_
+default_
+values
+Use
+=
+to separate a named parameter from its default value.
+error
+Learn more
+Copy name
+prefer_
+expression_
+function_
+bodies
+Use => for short members whose body is a single return statement.
+build
+Learn more
+Copy name
+prefer_
+final_
+fields
+Private field could be
+final
+.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+final_
+in_
+for_
+each
+Prefer final in for-each loop variable if reference is not reassigned.
+build
+Learn more
+Copy name
+prefer_
+final_
+locals
+Prefer final for variable declarations if they are not reassigned.
+build
+Learn more
+Copy name
+prefer_
+final_
+parameters
+Prefer final for parameter declarations if they are not reassigned.
+report
+build
+Learn more
+Copy name
+prefer_
+for_
+elements_
+to_
+map_
+fromiterable
+Prefer
+for
+elements when building maps from iterables.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+foreach
+Use
+forEach
+to only apply a function to all the elements.
+build
+Learn more
+Copy name
+prefer_
+function_
+declarations_
+over_
+variables
+Use a function declaration to bind a function to a name.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+generic_
+function_
+type_
+aliases
+Prefer generic function type aliases.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+if_
+elements_
+to_
+conditional_
+expressions
+Prefer if elements to conditional expressions where possible.
+build
+Learn more
+Copy name
+prefer_
+if_
+null_
+operators
+Prefer using
+??
+operators.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+initializing_
+formals
+Use initializing formals when possible.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+inlined_
+adds
+Inline list item declarations where possible.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+int_
+literals
+Prefer int literals over double literals.
+build
+Learn more
+Copy name
+prefer_
+interpolation_
+to_
+compose_
+strings
+Use interpolation to compose strings and values.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+is_
+empty
+Use
+isEmpty
+for
+Iterable
+s and
+Map
+s.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+is_
+not_
+empty
+Use
+isNotEmpty
+for
+Iterable
+s and
+Map
+s.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+is_
+not_
+operator
+Prefer is! operator.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+iterable_
+wheretype
+Prefer to use
+whereType
+on iterable.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+mixin
+Prefer using mixins.
+Learn more
+Copy name
+prefer_
+null_
+aware_
+method_
+calls
+Prefer
+null
+-aware method calls.
+Learn more
+Copy name
+prefer_
+null_
+aware_
+operators
+Prefer using
+null
+-aware operators.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+relative_
+imports
+Prefer relative imports for files in
+lib/
+.
+build
+Learn more
+Copy name
+prefer_
+single_
+quotes
+Only use double quotes for strings containing single quotes.
+build
+Learn more
+Copy name
+prefer_
+spread_
+collections
+Use spread collections when possible.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+typing_
+uninitialized_
+variables
+Prefer typing uninitialized variables and fields.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+prefer_
+void_
+to_
+null
+Don't use the Null type, unless you are positive that you don't want void.
+build
+Learn more
+Copy name
+provide_
+deprecation_
+message
+Provide a deprecation message, via
+@Deprecated("message")
+.
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+public_
+member_
+api_
+docs
+Document all public members.
+Learn more
+Copy name
+recursive_
+getters
+Property getter recursively returns itself.
+thumb_up
+flutter
+Learn more
+Copy name
+remove_
+deprecations_
+in_
+breaking_
+versions
+Deprecation in major version.
+Learn more
+Copy name
+require_
+trailing_
+commas
+Use trailing commas for all parameter lists and argument lists.
+build
+Learn more
+Copy name
+secure_
+pubspec_
+urls
+Use secure urls in
+pubspec.yaml
+.
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+simplify_
+variable_
+pattern
+Avoid unnecessary member names in variable patterns.
+build
+Learn more
+Copy name
+sized_
+box_
+for_
+whitespace
+SizedBox
+for whitespace.
+build
+flutter
+Learn more
+Copy name
+sized_
+box_
+shrink_
+expand
+Use SizedBox shrink and expand named constructors.
+Learn more
+Copy name
+slash_
+for_
+doc_
+comments
+Prefer using
+///
+for doc comments.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+sort_
+child_
+properties_
+last
+Sort child properties last in widget instance creations.
+build
+flutter
+Learn more
+Copy name
+sort_
+constructors_
+first
+Sort constructor declarations before other members.
+build
+Learn more
+Copy name
+sort_
+pub_
+dependencies
+Sort pub dependencies alphabetically.
+Learn more
+Copy name
+sort_
+unnamed_
+constructors_
+first
+Sort unnamed constructor declarations first.
+build
+Learn more
+Copy name
+specify_
+nonobvious_
+local_
+variable_
+types
+Specify non-obvious type annotations for local variables.
+science
+build
+Learn more
+Copy name
+specify_
+nonobvious_
+property_
+types
+Specify non-obvious type annotations for top-level and static variables.
+science
+build
+Learn more
+Copy name
+strict_
+top_
+level_
+inference
+Specify type annotations.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+super_
+goes_
+last
+Place the
+super
+call last in a constructor initialization list.
+error
+Learn more
+Copy name
+switch_
+on_
+type
+Avoid switch statements on a 'Type'.
+Learn more
+Copy name
+test_
+types_
+in_
+equals
+Test type of argument in
+operator ==(Object other)
+.
+Learn more
+Copy name
+throw_
+in_
+finally
+Avoid
+throw
+in
+finally
+block.
+Learn more
+Copy name
+tighten_
+type_
+of_
+initializing_
+formals
+Tighten type of initializing formal.
+Learn more
+Copy name
+type_
+annotate_
+public_
+apis
+Type annotate public APIs.
+build
+Learn more
+Copy name
+type_
+init_
+formals
+Don't type annotate initializing formals.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+type_
+literal_
+in_
+constant_
+pattern
+Don't use constant patterns with type literals.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+unawaited_
+futures
+Future
+results in
+async
+function bodies must be
+await
+ed or marked
+unawaited
+using
+dart:async
+.
+build
+Learn more
+Copy name
+unintended_
+html_
+in_
+doc_
+comment
+Use of angle brackets in a doc comment is treated as HTML by Markdown.
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+async
+No await no async.
+science
+build
+Learn more
+Copy name
+unnecessary_
+await_
+in_
+return
+Unnecessary
+await
+keyword in return.
+build
+Learn more
+Copy name
+unnecessary_
+brace_
+in_
+string_
+interps
+Avoid using braces in interpolation when not needed.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+breaks
+Don't use explicit
+break
+s when a break is implied.
+build
+Learn more
+Copy name
+unnecessary_
+const
+Avoid
+const
+keyword.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+constructor_
+name
+Unnecessary
+.new
+constructor name.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+final
+Don't use
+final
+for local variables.
+build
+Learn more
+Copy name
+unnecessary_
+getters_
+setters
+Avoid wrapping fields in getters and setters just to be "safe".
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+ignore
+Don't ignore a diagnostic code that is not produced.
+build
+Learn more
+Copy name
+unnecessary_
+lambdas
+Don't create a lambda when a tear-off will do.
+build
+Learn more
+Copy name
+unnecessary_
+late
+Don't specify the
+late
+modifier when it is not needed.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+library_
+directive
+Avoid library directives unless they have documentation comments or annotations.
+build
+Learn more
+Copy name
+unnecessary_
+library_
+name
+Don't have a library name in a
+library
+declaration.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+new
+Unnecessary new keyword.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+null_
+aware_
+assignments
+Avoid
+null
+in
+null
+-aware assignment.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+null_
+aware_
+operator_
+on_
+extension_
+on_
+nullable
+Unnecessary null aware operator on extension on a nullable type.
+Learn more
+Copy name
+unnecessary_
+null_
+checks
+Unnecessary
+null
+checks.
+science
+build
+Learn more
+Copy name
+unnecessary_
+null_
+in_
+if_
+null_
+operators
+Avoid using
+null
+in
+??
+operators.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+nullable_
+for_
+final_
+variable_
+declarations
+Use a non-nullable type for a final variable initialized with a non-nullable value.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+overrides
+Don't override a method to do a super method invocation with the same parameters.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+parenthesis
+Unnecessary parentheses can be removed.
+build
+Learn more
+Copy name
+unnecessary_
+raw_
+strings
+Unnecessary raw string.
+build
+Learn more
+Copy name
+unnecessary_
+statements
+Avoid using unnecessary statements.
+Learn more
+Copy name
+unnecessary_
+string_
+escapes
+Remove unnecessary backslashes in strings.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+string_
+interpolations
+Unnecessary string interpolation.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+this
+Don't access members with
+this
+unless avoiding shadowing.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+to_
+list_
+in_
+spreads
+Unnecessary
+toList()
+in spreads.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unnecessary_
+unawaited
+Unnecessary use of 'unawaited'.
+build
+Learn more
+Copy name
+unnecessary_
+underscores
+Unnecessary underscores can be removed.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+unreachable_
+from_
+main
+Unreachable top-level members in executable libraries.
+build
+Learn more
+Copy name
+unrelated_
+type_
+equality_
+checks
+Equality operator
+==
+invocation with references of unrelated types.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+unsafe_
+html
+Avoid unsafe HTML APIs.
+error
+Learn more
+Copy name
+unsafe_
+variance
+Unsafe type: Has a type variable in a non-covariant position.
+science
+Learn more
+Copy name
+use_
+build_
+context_
+synchronously
+Do not use
+BuildContext
+across asynchronous gaps.
+flutter
+Learn more
+Copy name
+use_
+colored_
+box
+Use
+ColoredBox
+.
+build
+Learn more
+Copy name
+use_
+decorated_
+box
+Use
+DecoratedBox
+.
+build
+Learn more
+Copy name
+use_
+enums
+Use enums rather than classes that behave like enums.
+build
+Learn more
+Copy name
+use_
+full_
+hex_
+values_
+for_
+flutter_
+colors
+Prefer an 8-digit hexadecimal integer (for example, 0xFFFFFFFF) to instantiate a Color.
+build
+flutter
+Learn more
+Copy name
+use_
+function_
+type_
+syntax_
+for_
+parameters
+Use generic function type syntax for parameters.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+use_
+if_
+null_
+to_
+convert_
+nulls_
+to_
+bools
+Use
+??
+operators to convert
+null
+s to
+bool
+s.
+report
+build
+Learn more
+Copy name
+use_
+is_
+even_
+rather_
+than_
+modulo
+Prefer intValue.isOdd/isEven instead of checking the result of % 2.
+Learn more
+Copy name
+use_
+key_
+in_
+widget_
+constructors
+Use key in widget constructors.
+build
+flutter
+Learn more
+Copy name
+use_
+late_
+for_
+private_
+fields_
+and_
+variables
+Use late for private members with a non-nullable type.
+science
+Learn more
+Copy name
+use_
+named_
+constants
+Use predefined named constants.
+build
+Learn more
+Copy name
+use_
+null_
+aware_
+elements
+If-elements testing for null can be replaced with null-aware elements.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+use_
+raw_
+strings
+Use raw string to avoid escapes.
+build
+Learn more
+Copy name
+use_
+rethrow_
+when_
+possible
+Use rethrow to rethrow a caught exception.
+build
+thumb_up
+flutter
+Learn more
+Copy name
+use_
+setters_
+to_
+change_
+properties
+Use a setter for operations that conceptually change a property.
+Learn more
+Copy name
+use_
+string_
+buffers
+Use string buffers to compose strings.
+Learn more
+Copy name
+use_
+string_
+in_
+part_
+of_
+directives
+Use string in part of directives.
+build
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+use_
+super_
+parameters
+Use super-initializer parameters where possible.
+science
+build
+thumb_up
+flutter
+Learn more
+Copy name
+use_
+test_
+throws_
+matchers
+Use throwsA matcher instead of fail().
+Learn more
+Copy name
+use_
+to_
+and_
+as_
+if_
+applicable
+Start the name of the method with to/_to or as/_as if applicable.
+Learn more
+Copy name
+use_
+truncating_
+division
+Use truncating division.
+build
+Learn more
+Copy name
+valid_
+regexps
+Use valid regular expression syntax.
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+void_
+checks
+Don't assign to
+void
+.
+circles
+thumb_up
+flutter
+Learn more
+Copy name
+Was this page's content helpful?
+thumb_up
+thumb_down
+Unless stated otherwise, the documentation on this site reflects Dart 3.11.0. Page last updated on 2025-10-16.
+View source
+or
+report an issue
+.
+Except as otherwise noted, this site is licensed under a
+Creative Commons Attribution 4.0 International License,
+and code samples are licensed under the
+3-Clause BSD License.
+Terms
+Privacy
+Security

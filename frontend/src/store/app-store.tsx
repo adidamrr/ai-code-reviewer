@@ -1,8 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { ApiClient } from "../lib/api";
+import { DEBUG_PR_PRESETS } from "../debug/presets";
 import type {
   AnalysisJob,
   AnalysisJobEvent,
+  CursorPage,
   FeedbackSummary,
   GithubPr,
   GithubRepo,
@@ -158,6 +160,24 @@ interface AppState {
   busy: boolean;
   error: string | null;
   activity: ActivityLog[];
+
+  debugSuite: {
+    running: boolean;
+    items: Array<{
+      presetId: string;
+      label: string;
+      owner: string;
+      repo: string;
+      prNumber: number;
+      repoId: string | null;
+      jobId: string | null;
+      status: "pending" | "running" | "done" | "failed";
+      suggestions: number | null;
+      error: string | null;
+      startedAt: string | null;
+      finishedAt: string | null;
+    }>;
+  };
 }
 
 interface AppStoreActions {
@@ -173,6 +193,7 @@ interface AppStoreActions {
 
   loadRepos: (reset?: boolean) => Promise<void>;
   selectRepo: (repoId: string) => void;
+  runDebugSuite: () => Promise<void>;
 
   setPrState: (repoId: string, value: "open" | "closed" | "all") => void;
   setPrSearch: (repoId: string, value: string) => void;
@@ -238,6 +259,23 @@ const initialState: AppState = {
   busy: false,
   error: null,
   activity: [],
+  debugSuite: {
+    running: false,
+    items: DEBUG_PR_PRESETS.map((preset) => ({
+      presetId: preset.id,
+      label: preset.label,
+      owner: preset.owner,
+      repo: preset.repo,
+      prNumber: preset.prNumber,
+      repoId: null,
+      jobId: null,
+      status: "pending" as const,
+      suggestions: null,
+      error: null,
+      startedAt: null,
+      finishedAt: null,
+    })),
+  },
 };
 
 export function AppStoreProvider({ children }: { children: React.ReactNode }) {
@@ -292,6 +330,65 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
   const setBusy = useCallback((next: boolean) => {
     setState((prev) => ({ ...prev, busy: next }));
   }, []);
+
+  const sleep = useCallback((ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms)), []);
+
+  const ensureRepoLoaded = useCallback(
+    async (sessionId: string, owner: string, name: string): Promise<GithubRepo> => {
+      const normalize = (value: string) => value.trim().toLowerCase();
+      const targetOwner = normalize(owner);
+      const targetName = normalize(name);
+
+      const existing = stateRef.current.repos.find(
+        (repo) => normalize(repo.owner) === targetOwner && normalize(repo.name) === targetName,
+      );
+      if (existing) {
+        return existing;
+      }
+
+      const api = apiFactory();
+      const merged = new Map<string, GithubRepo>();
+      for (const repo of stateRef.current.repos) {
+        merged.set(repo.repoId, repo);
+      }
+
+      let cursor: string | null = null;
+      let pageCount = 0;
+
+      while (pageCount < 30) {
+        const page: CursorPage<GithubRepo> = await api.getGithubRepos(sessionId, cursor);
+        pageCount += 1;
+
+        for (const repo of page.items) {
+          merged.set(repo.repoId, repo);
+        }
+
+        const values = [...merged.values()];
+        setState((prev) => ({
+          ...prev,
+          repos: values,
+          repoCursor: page.nextCursor,
+          selectedRepoId: prev.selectedRepoId ?? values[0]?.repoId ?? null,
+        }));
+
+        const found = page.items.find(
+          (repo) => normalize(repo.owner) === targetOwner && normalize(repo.name) === targetName,
+        );
+        if (found) {
+          return found;
+        }
+
+        if (!page.nextCursor) {
+          break;
+        }
+
+        cursor = page.nextCursor;
+      }
+
+      throw new Error(`Репозиторий ${owner}/${name} не найден или недоступен по текущему токену.`);
+    },
+    [apiFactory],
+  );
 
   const runTask = useCallback(
     async <T,>(label: string, task: () => Promise<T>): Promise<T> => {
@@ -351,6 +448,30 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       };
     });
   }, []);
+
+  const selectRepoInternal = useCallback(
+    (repoId: string, repo?: GithubRepo | null) => {
+      setState((prev) => {
+        const nextWorkflows = prev.workflows[repoId]
+          ? prev.workflows
+          : {
+              ...prev.workflows,
+              [repoId]: createDefaultWorkflow(repoId, workspacePreferencesRef.current[repoId]),
+            };
+
+        return {
+          ...prev,
+          selectedRepoId: repoId,
+          workflows: nextWorkflows,
+        };
+      });
+
+      if (repo) {
+        touchRecentRepo(repo);
+      }
+    },
+    [touchRecentRepo],
+  );
 
   const loadReposInternal = useCallback(
     async (sessionId: string, reset: boolean) => {
@@ -554,24 +675,179 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
 
       selectRepo: (repoId) => {
         const repo = stateRef.current.repos.find((item) => item.repoId === repoId);
+        selectRepoInternal(repoId, repo);
+      },
 
-        setState((prev) => {
-          const nextWorkflows = prev.workflows[repoId]
-            ? prev.workflows
-            : {
-                ...prev.workflows,
-                [repoId]: createDefaultWorkflow(repoId, workspacePreferencesRef.current[repoId]),
-              };
+      runDebugSuite: async () => {
+        const sessionId = stateRef.current.session?.sessionId;
+        if (!sessionId) {
+          setState((prev) => ({ ...prev, error: "Нет активной GitHub сессии" }));
+          return;
+        }
 
-          return {
+        const presets = DEBUG_PR_PRESETS;
+        const invalidPreset = presets.find(
+          (preset) =>
+            preset.owner.trim().length === 0 ||
+            preset.repo.trim().length === 0 ||
+            preset.repo.includes("REPLACE_ME") ||
+            preset.prNumber <= 0,
+        );
+        if (invalidPreset) {
+          setState((prev) => ({
             ...prev,
-            selectedRepoId: repoId,
-            workflows: nextWorkflows,
-          };
-        });
+            error: "Debug presets не настроены. Открой frontend/src/debug/presets.ts и замени owner/repo/prNumber.",
+          }));
+          return;
+        }
 
-        if (repo) {
-          touchRecentRepo(repo);
+        busyCounterRef.current += 1;
+        setBusy(true);
+        setState((prev) => ({
+          ...prev,
+          error: null,
+          debugSuite: {
+            running: true,
+            items: presets.map((preset) => ({
+              presetId: preset.id,
+              label: preset.label,
+              owner: preset.owner,
+              repo: preset.repo,
+              prNumber: preset.prNumber,
+              repoId: null,
+              jobId: null,
+              status: "pending" as const,
+              suggestions: null,
+              error: null,
+              startedAt: null,
+              finishedAt: null,
+            })),
+          },
+        }));
+
+        const updateItem = (presetId: string, patch: Partial<AppState["debugSuite"]["items"][number]>) => {
+          setState((prev) => ({
+            ...prev,
+            debugSuite: {
+              ...prev.debugSuite,
+              items: prev.debugSuite.items.map((item) => (item.presetId === presetId ? { ...item, ...patch } : item)),
+            },
+          }));
+        };
+
+        const api = apiFactory();
+
+        try {
+          for (const preset of presets) {
+            updateItem(preset.id, {
+              status: "running",
+              startedAt: new Date().toISOString(),
+              finishedAt: null,
+              error: null,
+              suggestions: null,
+              jobId: null,
+              repoId: null,
+            });
+            pushActivity(`[debug] start ${preset.owner}/${preset.repo}#${preset.prNumber}`);
+
+            try {
+              const repo = await ensureRepoLoaded(sessionId, preset.owner, preset.repo);
+              selectRepoInternal(repo.repoId, repo);
+
+              upsertWorkflow(repo.repoId, (workflow) => ({
+                ...workflow,
+                selectedPrNumber: preset.prNumber,
+              }));
+
+              const sync = await api.syncGithubPr(sessionId, repo.owner, repo.name, preset.prNumber);
+
+              upsertWorkflow(repo.repoId, (workflow) => ({
+                ...workflow,
+                syncData: sync,
+                selectedPrNumber: preset.prNumber,
+                activeStep: "params",
+                job: null,
+                jobEvents: [],
+                suggestions: [],
+                selectedSuggestionIds: [],
+                activeSuggestionId: null,
+                publishResult: null,
+                comments: [],
+                feedbackSummary: null,
+              }));
+
+              const scope = (preset.scope?.length ? preset.scope : ["security", "bugs", "style"]) as SuggestionScope[];
+              const maxComments = preset.maxComments ?? 40;
+
+              const created = await api.createAnalysisJob(sync.prId, {
+                snapshotId: sync.snapshotId,
+                scope,
+                maxComments,
+              });
+
+              updateItem(preset.id, { repoId: repo.repoId, jobId: created.jobId });
+
+              const fresh = await api.getAnalysisJob(created.jobId);
+              upsertWorkflow(repo.repoId, (workflow) => ({
+                ...workflow,
+                job: fresh,
+                activeStep: "job",
+              }));
+
+              const deadline = Date.now() + 15 * 60 * 1000;
+              let current = fresh;
+
+              while (Date.now() < deadline) {
+                if (current.status === "done" || current.status === "failed" || current.status === "canceled") {
+                  break;
+                }
+
+                await sleep(2000);
+                current = await api.getAnalysisJob(created.jobId);
+                upsertWorkflow(repo.repoId, (workflow) => ({ ...workflow, job: current }));
+              }
+
+              if (current.status !== "done" && current.status !== "failed" && current.status !== "canceled") {
+                throw new Error("Timeout ожидания завершения job (15m).");
+              }
+
+              await loadJobEventsInternal(repo.repoId, current.id);
+              if (current.status === "done") {
+                await loadSuggestionsInternal(repo.repoId, current.id);
+              }
+
+              updateItem(preset.id, {
+                status: current.status === "done" ? "done" : "failed",
+                suggestions: current.summary.totalSuggestions ?? 0,
+                finishedAt: new Date().toISOString(),
+              });
+
+              pushActivity(
+                `[debug] ${current.status} ${preset.owner}/${preset.repo}#${preset.prNumber} suggestions=${current.summary.totalSuggestions ?? 0}`,
+              );
+            } catch (error) {
+              const message = formatUiError(error, stateRef.current.backendUrl);
+              updateItem(preset.id, {
+                status: "failed",
+                error: message,
+                finishedAt: new Date().toISOString(),
+              });
+              pushActivity(`[debug] failed ${preset.owner}/${preset.repo}#${preset.prNumber}: ${message}`);
+            }
+          }
+        } finally {
+          setState((prev) => ({
+            ...prev,
+            debugSuite: {
+              ...prev.debugSuite,
+              running: false,
+            },
+          }));
+
+          busyCounterRef.current = Math.max(0, busyCounterRef.current - 1);
+          if (busyCounterRef.current === 0) {
+            setBusy(false);
+          }
         }
       },
 
@@ -995,8 +1271,11 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       loadJobEventsInternal,
       loadReposInternal,
       loadSuggestionsInternal,
+      ensureRepoLoaded,
       runTask,
+      sleep,
       touchRecentRepo,
+      selectRepoInternal,
       upsertWorkflow,
     ],
   );

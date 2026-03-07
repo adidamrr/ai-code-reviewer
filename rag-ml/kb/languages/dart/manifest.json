@@ -1,16 +1,30 @@
 {
   "language": "dart",
   "displayName": "Dart",
-  "defaultVersion": "TODO",
+  "defaultVersion": "stable",
+  "docRoots": ["docs"],
   "sources": [
     {
-      "sourceId": "todo-dart-lang",
-      "title": "Dart language tour / docs",
-      "url": "TODO",
+      "sourceId": "dart-language-tour",
+      "title": "Dart language tour",
+      "url": "https://dart.dev/guides/language/language-tour",
       "format": "html",
-      "license": "TODO"
+      "license": "CC BY 4.0 (content); BSD-3-Clause (code samples)"
+    },
+    {
+      "sourceId": "effective-dart",
+      "title": "Effective Dart",
+      "url": "https://dart.dev/guides/language/effective-dart",
+      "format": "html",
+      "license": "CC BY 4.0 (content); BSD-3-Clause (code samples)"
+    },
+    {
+      "sourceId": "dart-linter-rules",
+      "title": "Dart linter rules",
+      "url": "https://dart.dev/tools/linter-rules",
+      "format": "html",
+      "license": "CC BY 4.0 (content); BSD-3-Clause (code samples)"
     }
   ],
-  "notes": "Для MVP полезны темы: async/await, null safety, collections, style guide."
+  "notes": "MVP источники: language tour, Effective Dart, linter rules. Формат: HTML -> текст, разложенный в docs/<sourceId>/."
 }
-

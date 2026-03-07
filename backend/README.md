@@ -16,18 +16,20 @@ Backend MVP for AI code review plugin.
 - SQL schema is the source for production Postgres implementation.
 - API shape and enums are aligned with OpenAPI contract.
 
-## Scripts
+## Run (Python/FastAPI)
 ```bash
 cd backend
-npm install
-npm run dev
-npm run typecheck
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
 ```
 
 Single-host mode (backend + frontend on one host):
 ```bash
-cd backend
-npm run single:run
+cd frontend && npm run build
+cd ../backend
+SERVE_FRONTEND=true FRONTEND_DIST_PATH=../frontend/dist python main.py
 ```
 Then open `http://localhost:4000`.
 
@@ -42,3 +44,4 @@ Then open `http://localhost:4000`.
 - Handoff: `docs/handoff.md`
 - Examples: `docs/examples/*.json`
 - GitHub smoke test: `docs/github-smoke-test.md`
+- Export 3 PR to debug mocks: `docs/debug-pr-mocks.md`

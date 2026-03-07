@@ -20,3 +20,9 @@
   - URL: https://timsong-cpp.github.io/cppwp/draft.pdf
   - Notes: проверь условия использования/распространения перед публикацией извлечённого текста
 
+- Dart docs (dart.dev)
+  - URLs:
+    - https://dart.dev/guides/language/language-tour
+    - https://dart.dev/guides/language/effective-dart
+    - https://dart.dev/tools/linter-rules
+  - License: CC BY 4.0 (content); BSD-3-Clause (code samples). См. https://github.com/dart-lang/site-www/blob/main/LICENSE

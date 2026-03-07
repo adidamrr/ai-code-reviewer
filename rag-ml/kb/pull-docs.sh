@@ -124,6 +124,17 @@ main() {
   local cpp_pdf="$ROOT/languages/cpp/downloads/cpp-draft.pdf"
   fetch "https://timsong-cpp.github.io/cppwp/draft.pdf" "$cpp_pdf"
 
+  # Dart: docs pages (HTML -> text)
+  local dart_dir="$ROOT/languages/dart"
+  fetch "https://dart.dev/guides/language/language-tour" "$dart_dir/downloads/dart-language-tour.html"
+  html_to_text "$dart_dir/downloads/dart-language-tour.html" "$dart_dir/raw/dart-language-tour/language-tour.txt"
+
+  fetch "https://dart.dev/guides/language/effective-dart" "$dart_dir/downloads/dart-effective-dart.html"
+  html_to_text "$dart_dir/downloads/dart-effective-dart.html" "$dart_dir/raw/effective-dart/effective-dart.txt"
+
+  fetch "https://dart.dev/tools/linter-rules" "$dart_dir/downloads/dart-linter-rules.html"
+  html_to_text "$dart_dir/downloads/dart-linter-rules.html" "$dart_dir/raw/dart-linter-rules/linter-rules.txt"
+
   say "done"
   say "Downloaded files are in gitignored folders under rag-ml/kb/languages/*/(downloads|raw)/"
 }

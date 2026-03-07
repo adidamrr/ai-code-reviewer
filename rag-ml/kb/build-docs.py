@@ -128,6 +128,21 @@ def build_cpp(root: Path, *, pages_per_file: int) -> None:
         start = end + 1
 
 
+def build_dart(root: Path) -> None:
+    lang = root / "languages" / "dart"
+    raw_root = lang / "raw"
+    out_root = lang / "docs"
+    if not raw_root.exists():
+        raise SystemExit("Dart raw docs not found. Run: ./rag-ml/kb/pull-docs.sh")
+
+    say("dart: copy raw text pages -> docs/<sourceId>/")
+    for source_dir in sorted([p for p in raw_root.iterdir() if p.is_dir()]):
+        dest = out_root / source_dir.name
+        reset_dir(dest)
+        copy_tree(source_dir, dest)
+        say(f"dart: {source_dir.name} files={sum(1 for _ in dest.rglob('*.txt'))}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build commit-ready KB docs from raw downloads.")
     parser.add_argument("--root", default=str(Path(__file__).resolve().parent), help="rag-ml/kb directory")
@@ -142,9 +157,9 @@ def main() -> None:
     build_javascript(kb_root)
     build_swift(kb_root)
     build_cpp(kb_root, pages_per_file=args.cpp_pages_per_file)
+    build_dart(kb_root)
     say("done")
 
 
 if __name__ == "__main__":
     main()
-

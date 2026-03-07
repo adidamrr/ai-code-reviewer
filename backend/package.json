@@ -1,28 +1,14 @@
 {
   "name": "swagreviewer-backend",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "type": "module",
   "scripts": {
-    "dev": "tsx watch src/main.ts",
-    "start": "node dist/main.js",
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "tsx --test tests/**/*.test.ts",
-    "smoke:github-pr": "tsx scripts/github-smoke.ts",
-    "single:build": "npm --prefix ../frontend run build && npm run build",
-    "single:start": "SERVE_FRONTEND=true FRONTEND_DIST_PATH=../frontend/dist node dist/main.js",
+    "dev": "./.venv/bin/python main.py",
+    "start": "./.venv/bin/python main.py",
+    "smoke:github-pr": "./.venv/bin/python scripts/github_smoke.py",
+    "export:pr-mocks": "./.venv/bin/python scripts/export_pr_mocks.py",
+    "single:build": "npm --prefix ../frontend run build",
+    "single:start": "SERVE_FRONTEND=true FRONTEND_DIST_PATH=../frontend/dist ./.venv/bin/python main.py",
     "single:run": "npm run single:build && npm run single:start"
-  },
-  "dependencies": {
-    "express": "^4.21.2"
-  },
-  "devDependencies": {
-    "@types/express": "^4.17.21",
-    "@types/node": "^22.13.14",
-    "@types/supertest": "^6.0.3",
-    "supertest": "^7.1.1",
-    "tsx": "^4.19.3",
-    "typescript": "^5.8.2"
   }
 }
