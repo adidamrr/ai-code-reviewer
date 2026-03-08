@@ -39,6 +39,8 @@ FILE_CLASS_PATTERNS = {
 
 
 def classify_file(file: RagFile) -> str:
+    if file.fileRole:
+        return file.fileRole
     path = file.path.lower()
     for file_class, patterns in FILE_CLASS_PATTERNS.items():
         if any(pattern in path for pattern in patterns):

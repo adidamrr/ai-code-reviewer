@@ -12,6 +12,7 @@ NETWORK_TOKENS = {"http", "dio", "request", "response", "fetch", "query", "db"}
 PY_MUTABLE_DEFAULT_TOKENS = {"=[]", "={}", "=set("}
 PY_BROAD_EXCEPT_TOKENS = {"except exception:"}
 SQL_TOKENS = {"select ", "insert ", "update ", "delete "}
+TERMINAL_STATEMENT_TOKENS = ("return ", "return", "raise ")
 
 
 def _added_lines(file: RagFile) -> list[tuple[int, str]]:
@@ -134,6 +135,29 @@ def collect_static_signals(files: list[RagFile]) -> StaticChecksResult:
                     message="В patch есть broad exception handling.",
                     lineStart=min(broad_except_lines),
                     lineEnd=max(broad_except_lines),
+                )
+            )
+
+        control_flow_lines: list[int] = []
+        for index in range(len(added) - 1):
+            line_no, text = added[index]
+            next_line_no, next_text = added[index + 1]
+            stripped = text.strip()
+            next_stripped = next_text.strip()
+            if not next_stripped or next_stripped.startswith("#"):
+                continue
+            if any(stripped.startswith(token) for token in TERMINAL_STATEMENT_TOKENS):
+                control_flow_lines.extend([line_no, next_line_no])
+        if control_flow_lines:
+            signals.append(
+                StaticSignal(
+                    signalId=f"{file.path}:unreachable-after-terminal",
+                    filePath=file.path,
+                    type="unreachable-after-terminal",
+                    severity="medium",
+                    message="В patch есть код после return/raise, который может быть недостижим.",
+                    lineStart=min(control_flow_lines),
+                    lineEnd=max(control_flow_lines),
                 )
             )
 

@@ -107,6 +107,8 @@ def select_hunks(file: RagFile, max_hunks: int) -> list[HunkTask]:
                 imports=file.imports,
                 changedSymbols=file.changedSymbols,
                 surroundingCode=file.surroundingCode,
+                changedBlocks=file.changedBlocks,
+                relatedCallSites=file.relatedCallSites,
             )
         )
 

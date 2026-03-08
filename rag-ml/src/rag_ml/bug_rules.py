@@ -10,6 +10,7 @@ PY_BROAD_EXCEPT = re.compile(r"^\s*except\s+Exception\s*:")
 PY_SQL_FSTRING = re.compile(r"(?:SELECT|INSERT|UPDATE|DELETE).*(\{.+\}|%s|%\()", re.IGNORECASE)
 PY_LOG_SECRET = re.compile(r"(?:logger|logging)\.[A-Za-z_]+\(.*(token|secret|password)", re.IGNORECASE)
 PY_AWAITABLE_CALL = re.compile(r"\b(fetch|load|send|notify|publish|request|query|execute|create_task)\w*\(")
+PY_TERMINAL_STATEMENT = re.compile(r"^\s*(return\b|raise\b)")
 
 
 def _line_for_match(task: HunkTask, index: int) -> int:
@@ -108,6 +109,28 @@ def rule_based_bug_candidates(task: HunkTask, signals: list[StaticSignal]) -> li
                     body="This change returns or forwards a call that looks asynchronous without awaiting it. Verify that the surrounding function is intentionally returning the awaitable instead of its resolved result.",
                     confidence=0.74,
                     evidenceRefs=[code_ref(task.taskId, 0), *_matching_rule_ref(task, signals, preferred_type="async-risk")],
+                )
+            )
+
+    for index in range(len(task.addedLines) - 1):
+        line_no = _line_for_match(task, index)
+        next_line_no = _line_for_match(task, index + 1)
+        stripped = task.addedLines[index].strip()
+        next_stripped = task.addedLines[index + 1].strip()
+        if not next_stripped or next_stripped.startswith("#"):
+            continue
+        if PY_TERMINAL_STATEMENT.search(stripped):
+            candidates.append(
+                CandidateFinding(
+                    filePath=task.filePath,
+                    lineStart=next_line_no,
+                    lineEnd=next_line_no,
+                    severity="medium",
+                    category="bugs",
+                    title="Remove unreachable code after terminal statement",
+                    body="This block adds executable code after a return or raise statement, so the later line will never run.",
+                    confidence=0.9,
+                    evidenceRefs=[code_ref(task.taskId, 0), *_matching_rule_ref(task, signals, preferred_type="unreachable-after-terminal")],
                 )
             )
 

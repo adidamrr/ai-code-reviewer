@@ -317,6 +317,35 @@ class RagRuntimeTests(unittest.IsolatedAsyncioTestCase):
         candidates = rule_based_bug_candidates(task, [])
         self.assertTrue(any(candidate.title == "Avoid mutable default arguments" for candidate in candidates))
 
+    def test_bug_rules_detect_unreachable_after_return(self) -> None:
+        task = HunkTask(
+            taskId="src/example.py:0",
+            filePath="src/example.py",
+            language="Python",
+            languageSlug="python",
+            patch="@@ -1 +1 @@\n+return item\n+cache.invalidate(key)",
+            hunkIndex=0,
+            hunkHeader="@@ -1 +1 @@",
+            hunkPatch="@@ -1 +1 @@\n+return item\n+cache.invalidate(key)",
+            addedLines=["return item", "cache.invalidate(key)"],
+            changedNewLines=[10, 11],
+            firstChangedLine=10,
+            priority=1.0,
+        )
+        signals = [
+            StaticSignal(
+                signalId="unreachable-after-terminal",
+                filePath="src/example.py",
+                type="unreachable-after-terminal",
+                severity="medium",
+                message="Code after return may be unreachable.",
+                lineStart=10,
+                lineEnd=11,
+            )
+        ]
+        candidates = rule_based_bug_candidates(task, signals)
+        self.assertTrue(any(candidate.title == "Remove unreachable code after terminal statement" for candidate in candidates))
+
     def test_verifier_rejects_valid_private_dart_type_name(self) -> None:
         candidate = CandidateFinding(
             filePath="lib/example.dart",

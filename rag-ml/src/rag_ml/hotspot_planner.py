@@ -67,6 +67,10 @@ def plan_hotspot_tasks(
             base_boost += 0.2
         if file_class == "model":
             base_boost += 0.05
+        if file.changedBlocks:
+            base_boost += min(0.25, 0.08 * len(file.changedBlocks))
+        if file.relatedCallSites:
+            base_boost += min(0.25, 0.05 * len(file.relatedCallSites))
         for task in raw_hunks:
             planned.append(
                 task.model_copy(

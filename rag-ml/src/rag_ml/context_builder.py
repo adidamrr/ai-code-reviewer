@@ -15,10 +15,11 @@ def _truncate(value: str, limit: int = 320) -> str:
 
 def build_context_pack(task: HunkTask, signals: list[StaticSignal], doc_hits: list[RetrievalHit]) -> ContextPack:
     code_candidates: list[ContextEvidenceCandidate] = []
-    for index, line in enumerate(task.surroundingCode[:8]):
+    next_index = 0
+    for line in task.surroundingCode[:8]:
         code_candidates.append(
             ContextEvidenceCandidate(
-                refId=code_ref(task.taskId, index),
+                refId=code_ref(task.taskId, next_index),
                 type="code",
                 title=f"Кодовый контекст {task.filePath}:{line.lineNumber}",
                 snippet=_truncate(line.text),
@@ -28,6 +29,45 @@ def build_context_pack(task: HunkTask, signals: list[StaticSignal], doc_hits: li
                 metadata={"taskId": task.taskId},
             )
         )
+        next_index += 1
+    for block in task.changedBlocks[:4]:
+        code_candidates.append(
+            ContextEvidenceCandidate(
+                refId=code_ref(task.taskId, next_index),
+                type="code",
+                title=f"Измененный блок {block.symbol or task.filePath}",
+                snippet=_truncate(block.afterSnippet or block.snippet, 420),
+                filePath=task.filePath,
+                lineStart=block.lineStart,
+                lineEnd=block.lineEnd,
+                metadata={
+                    "taskId": task.taskId,
+                    "blockId": block.blockId,
+                    "symbol": block.symbol,
+                    "kind": block.kind,
+                    "beforeSnippet": block.beforeSnippet,
+                },
+            )
+        )
+        next_index += 1
+    for call_site in task.relatedCallSites[:6]:
+        code_candidates.append(
+            ContextEvidenceCandidate(
+                refId=code_ref(task.taskId, next_index),
+                type="code",
+                title=f"Связанный вызов {call_site.symbol}",
+                snippet=_truncate(call_site.snippet, 320),
+                filePath=call_site.filePath,
+                lineStart=call_site.lineStart,
+                lineEnd=call_site.lineEnd,
+                metadata={
+                    "taskId": task.taskId,
+                    "relation": call_site.relation,
+                    "symbol": call_site.symbol,
+                },
+            )
+        )
+        next_index += 1
     if not code_candidates:
         code_candidates.append(
             ContextEvidenceCandidate(

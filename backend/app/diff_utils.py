@@ -9,6 +9,20 @@ IMPORT_REGEXES = (
     re.compile(r"^\+\s*import\s+.+?\s+from\s+['\"]([^'\"]+)['\"]"),
     re.compile(r"^\+\s*from\s+([A-Za-z0-9_\.]+)\s+import\s+"),
 )
+PY_BLOCK_REGEXES = (
+    re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)"),
+    re.compile(r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)"),
+)
+GENERIC_BLOCK_REGEXES = (
+    re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)"),
+    re.compile(r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)"),
+    re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)"),
+)
+CALL_SITE_DEFINITION_HINTS = (
+    re.compile(r"^\s*(?:async\s+)?def\s+"),
+    re.compile(r"^\s*class\s+"),
+    re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+"),
+)
 SYMBOL_REGEXES = (
     re.compile(r"^\+\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)"),
     re.compile(r"^\+\s*(?:class|enum|typedef|extension)\s+([A-Za-z_][A-Za-z0-9_]*)"),
@@ -188,3 +202,144 @@ def detect_language(file_path: str) -> str:
 
     extension = chunks[-1].lower()
     return EXTENSION_LANGUAGE_MAP.get(extension, "PlainText")
+
+
+def infer_file_role(file_path: str) -> str:
+    path = file_path.lower()
+    if any(token in path for token in ("/docs/", "readme", ".md", ".rst", "changelog", "license")):
+        return "docs"
+    if any(token in path for token in ("/localization/", "/translations/", "_strings_", "/l10n/", ".arb", ".json", ".yaml", ".yml")):
+        return "resource"
+    if any(token in path for token in ("/generated/", ".g.dart", ".pb.dart", ".gen.py", "_generated.py")):
+        return "generated"
+    if any(token in path for token in ("/tests/", "test_", "_test.py", "_test.dart")):
+        return "test"
+    if any(token in path for token in ("/api/", "/routes/", "handler", "endpoint")):
+        return "api"
+    if any(token in path for token in ("/repositories/", "/repository/", "/dao/", "/queries/")):
+        return "repository"
+    if any(token in path for token in ("/services/", "/service/", "/use_cases/", "/usecases/")):
+        return "logic"
+    if any(token in path for token in ("/models/", "/schemas/", "/entities/")):
+        return "model"
+    return "logic"
+
+
+def _block_patterns_for_path(file_path: str) -> tuple[re.Pattern[str], ...]:
+    if file_path.lower().endswith(".py"):
+        return PY_BLOCK_REGEXES
+    return GENERIC_BLOCK_REGEXES
+
+
+def _find_symbol_and_kind(file_path: str, lines: list[str]) -> tuple[str | None, str]:
+    patterns = _block_patterns_for_path(file_path)
+    for text in reversed(lines):
+        for pattern in patterns:
+            match = pattern.search(text)
+            if not match:
+                continue
+            symbol = match.group(1)
+            kind = "class" if text.strip().startswith("class ") else "function"
+            return symbol, kind
+    return None, "block"
+
+
+def extract_changed_blocks_from_patch(patch: str, file_path: str, *, limit: int = 4) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    current_header = ""
+    current_new = 1
+    current_lines: list[dict[str, Any]] = []
+
+    def flush_block() -> None:
+        if not current_lines:
+            return
+        visible_lines = [item["text"] for item in current_lines if item["type"] in {"ctx", "add"} and item["text"].strip()]
+        before_lines = [item["text"] for item in current_lines if item["type"] in {"ctx", "del"} and item["text"].strip()]
+        after_lines = [item["text"] for item in current_lines if item["type"] in {"ctx", "add"} and item["text"].strip()]
+        line_numbers = [item["lineNumber"] for item in current_lines if item["lineNumber"] is not None]
+        if not visible_lines or not line_numbers:
+            return
+        symbol, kind = _find_symbol_and_kind(file_path, visible_lines)
+        block_index = len(blocks)
+        blocks.append(
+            {
+                "blockId": f"{file_path}:{block_index}",
+                "symbol": symbol,
+                "kind": kind,
+                "lineStart": min(line_numbers),
+                "lineEnd": max(line_numbers),
+                "snippet": "\n".join(visible_lines[:18]),
+                "beforeSnippet": "\n".join(before_lines[:18]) or None,
+                "afterSnippet": "\n".join(after_lines[:18]) or None,
+                "header": current_header or None,
+            }
+        )
+
+    for raw_line in patch.splitlines():
+        match = HUNK_REGEX.match(raw_line)
+        if match:
+            flush_block()
+            current_header = raw_line
+            current_new = int(match.group(3))
+            current_lines = []
+            continue
+        if raw_line.startswith("-") and not raw_line.startswith("---"):
+            current_lines.append({"type": "del", "lineNumber": None, "text": raw_line[1:]})
+            continue
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            current_lines.append({"type": "add", "lineNumber": current_new, "text": raw_line[1:]})
+            current_new += 1
+            continue
+        if raw_line.startswith(" "):
+            current_lines.append({"type": "ctx", "lineNumber": current_new, "text": raw_line[1:]})
+            current_new += 1
+            continue
+    flush_block()
+    return blocks[:limit]
+
+
+def _is_definition_line(text: str) -> bool:
+    return any(pattern.search(text) for pattern in CALL_SITE_DEFINITION_HINTS)
+
+
+def build_related_call_sites(snapshot_files: list[dict[str, Any]], *, per_file_limit: int = 8) -> None:
+    code_lines_by_file: dict[str, list[dict[str, Any]]] = {}
+    for file in snapshot_files:
+        code_lines_by_file[file["path"]] = [
+            {"lineNumber": int(line["lineNumber"]), "text": str(line["text"])}
+            for line in (file.get("surroundingCode") or [])
+        ]
+
+    for target in snapshot_files:
+        symbols = [symbol for symbol in (target.get("changedSymbols") or []) if symbol]
+        related: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, int]] = set()
+        for symbol in symbols:
+            call_pattern = re.compile(rf"\b{re.escape(symbol)}\s*\(")
+            for source in snapshot_files:
+                for line in code_lines_by_file.get(source["path"], []):
+                    if _is_definition_line(line["text"]):
+                        continue
+                    if not call_pattern.search(line["text"]):
+                        continue
+                    key = (symbol, source["path"], line["lineNumber"])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    related.append(
+                        {
+                            "symbol": symbol,
+                            "filePath": source["path"],
+                            "lineStart": line["lineNumber"],
+                            "lineEnd": line["lineNumber"],
+                            "snippet": line["text"],
+                            "relation": "changed-file-call-site",
+                        }
+                    )
+                    if len(related) >= per_file_limit:
+                        break
+                if len(related) >= per_file_limit:
+                    break
+            if len(related) >= per_file_limit:
+                break
+        target["relatedCallSites"] = related

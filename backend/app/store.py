@@ -7,11 +7,14 @@ from uuid import uuid4
 
 from .adaptation import rerank_suggestions
 from .diff_utils import (
+    build_related_call_sites,
     count_patch_changes,
     detect_language,
+    extract_changed_blocks_from_patch,
     extract_changed_symbols_from_patch,
     extract_imports_from_patch,
     extract_surrounding_code_from_patch,
+    infer_file_role,
     parse_unified_diff,
 )
 from .errors import HttpError
@@ -237,6 +240,7 @@ class InMemoryStore:
             "path": file_input["path"],
             "status": file_input.get("status", "modified"),
             "language": file_input.get("language") or detect_language(file_input["path"]),
+            "fileRole": infer_file_role(file_input["path"]),
             "additions": file_input.get("additions", changes["additions"]),
             "deletions": file_input.get("deletions", changes["deletions"]),
             "patch": "" if too_large else patch,
@@ -245,6 +249,8 @@ class InMemoryStore:
             "imports": [] if too_large else extract_imports_from_patch(patch),
             "changedSymbols": [] if too_large else extract_changed_symbols_from_patch(patch),
             "surroundingCode": [] if too_large else extract_surrounding_code_from_patch(patch),
+            "changedBlocks": [] if too_large else extract_changed_blocks_from_patch(patch, file_input["path"]),
+            "relatedCallSites": [],
             "patchHash": sha256(patch),
             "isTooLarge": too_large,
             "createdAt": created_at,
@@ -303,6 +309,13 @@ class InMemoryStore:
             deletions += int(normalized["deletions"])
             self.snapshot_files[normalized["id"]] = normalized
             self.snapshot_files_by_snapshot[snapshot_id].append(normalized["id"])
+
+        snapshot_files = [
+            self.snapshot_files[item_id]
+            for item_id in self.snapshot_files_by_snapshot[snapshot_id]
+            if item_id in self.snapshot_files
+        ]
+        build_related_call_sites(snapshot_files)
 
         snapshot["additions"] = additions
         snapshot["deletions"] = deletions
@@ -543,9 +556,12 @@ class InMemoryStore:
                         "patch": file["patch"],
                         "hunks": file.get("hunks"),
                         "lineMap": file.get("lineMap"),
+                        "fileRole": file.get("fileRole"),
                         "imports": file.get("imports"),
                         "changedSymbols": file.get("changedSymbols"),
                         "surroundingCode": file.get("surroundingCode"),
+                        "changedBlocks": file.get("changedBlocks"),
+                        "relatedCallSites": file.get("relatedCallSites"),
                     }
                     for file in eligible_files
                 ],

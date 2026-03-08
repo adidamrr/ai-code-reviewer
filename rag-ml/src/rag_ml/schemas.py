@@ -138,15 +138,39 @@ class RagCodeContextLine(Model):
     text: str
 
 
+class RagChangedBlock(Model):
+    blockId: str
+    symbol: str | None = None
+    kind: str = "block"
+    lineStart: int
+    lineEnd: int
+    snippet: str
+    beforeSnippet: str | None = None
+    afterSnippet: str | None = None
+    header: str | None = None
+
+
+class RagRelatedCallSite(Model):
+    symbol: str
+    filePath: str
+    lineStart: int
+    lineEnd: int
+    snippet: str
+    relation: str = "call-site"
+
+
 class RagFile(Model):
     path: str
     language: str
     patch: str
     hunks: list[RagHunk] | None = None
     lineMap: list[RagLineMapEntry] | None = None
+    fileRole: str | None = None
     imports: list[str] = Field(default_factory=list)
     changedSymbols: list[str] = Field(default_factory=list)
     surroundingCode: list[RagCodeContextLine] = Field(default_factory=list)
+    changedBlocks: list[RagChangedBlock] = Field(default_factory=list)
+    relatedCallSites: list[RagRelatedCallSite] = Field(default_factory=list)
 
 
 class RagLimits(Model):
@@ -352,6 +376,8 @@ class HunkTask(Model):
     imports: list[str] = Field(default_factory=list)
     changedSymbols: list[str] = Field(default_factory=list)
     surroundingCode: list[RagCodeContextLine] = Field(default_factory=list)
+    changedBlocks: list[RagChangedBlock] = Field(default_factory=list)
+    relatedCallSites: list[RagRelatedCallSite] = Field(default_factory=list)
     categories: list[str] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
     staticSignalIds: list[str] = Field(default_factory=list)
