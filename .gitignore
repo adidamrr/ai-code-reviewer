@@ -16,3 +16,5 @@ rag-ml/kb/**/downloads/
 rag-ml/kb/**/build/
 rag-ml/kb/**/.cache/
 rag-ml/kb/**/index/
+rag-ml/build/
+rag-ml/.venv/

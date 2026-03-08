@@ -17,6 +17,7 @@ from .config import AppConfig, load_config
 from .errors import HttpError
 from .github_session import GithubSessionStore
 from .pagination import paginate
+from .rag_adapter import get_rag_status
 from .store import InMemoryStore
 
 API_PREFIXES = (
@@ -229,8 +230,12 @@ def create_app(config: AppConfig) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/readyz")
-    async def readyz() -> dict[str, str]:
-        return {"status": "ready"}
+    async def readyz(response: Response) -> dict[str, Any]:
+        rag = await get_rag_status()
+        if not rag.get("ready", False):
+            response.status_code = 503
+            return {"status": "not_ready", "rag": rag}
+        return {"status": "ready", "rag": rag}
 
     @app.post("/webhooks/github", status_code=202)
     async def github_webhook(request: Request) -> dict[str, Any]:

@@ -1,83 +1,60 @@
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
 from typing import Any
 
-DEFAULT_CITATIONS: dict[str, dict[str, str]] = {
-    "security": {
-        "sourceId": "owasp-top-10",
-        "title": "OWASP Top 10",
-        "url": "https://owasp.org/www-project-top-ten/",
-        "snippet": "Validate all untrusted input and use context-aware output encoding.",
-    },
-    "style": {
-        "sourceId": "clean-code",
-        "title": "Clean Code Principles",
-        "url": "https://martinfowler.com/bliki/CodeSmell.html",
-        "snippet": "Prefer clear naming and small focused functions.",
-    },
-    "bugs": {
-        "sourceId": "github-engineering",
-        "title": "GitHub Engineering Practices",
-        "url": "https://github.blog/engineering/",
-        "snippet": "Cover edge cases and fail fast with actionable errors.",
-    },
-    "performance": {
-        "sourceId": "web-dev-performance",
-        "title": "Web Performance Fundamentals",
-        "url": "https://web.dev/fast/",
-        "snippet": "Avoid unnecessary work in hot paths and use bounded loops.",
-    },
-}
+
+def parse_bool(value: str | None, *, default: bool = True) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def choose_severity(category: str) -> str:
-    if category == "security":
-        return "high"
-    if category == "performance":
-        return "medium"
-    if category == "style":
-        return "low"
-    return "medium"
+RAG_SRC_ROOT = Path(__file__).resolve().parents[2] / "rag-ml" / "src"
+if str(RAG_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(RAG_SRC_ROOT))
+
+try:
+    from rag_ml.service import analyze_request, runtime_status
+except Exception as error:  # pragma: no cover - surfaced at runtime with actionable message
+    analyze_request = None
+    runtime_status = None
+    IMPORT_ERROR = error
+else:
+    IMPORT_ERROR = None
 
 
 async def analyze_with_rag(request: dict[str, Any]) -> dict[str, Any]:
-    suggestions: list[dict[str, Any]] = []
-    scope = request.get("scope") or ["bugs"]
-    files = request.get("files") or []
-    limits = request.get("limits") or {}
-    max_comments = int(limits.get("maxComments") or 50)
+    if not parse_bool(os.getenv("RAG_ENABLED"), default=True):
+        return {"suggestions": [], "partialFailures": 0}
 
-    for index, file in enumerate(files):
-        if len(suggestions) >= max_comments:
-            break
-
-        patch = str(file.get("patch") or "").strip()
-        if not patch:
-            continue
-
-        line_map = file.get("lineMap") or []
-        first_added_line = 1
-        for entry in line_map:
-            if entry.get("type") == "add":
-                first_added_line = entry.get("newLine") or 1
-                break
-
-        category = scope[index % len(scope)]
-        suggestions.append(
-            {
-                "filePath": file.get("path"),
-                "lineStart": first_added_line,
-                "lineEnd": first_added_line,
-                "severity": choose_severity(category),
-                "category": category,
-                "title": f"Potential {category} issue in {file.get('path')}",
-                "body": f"Check this change for {category} risks and ensure it follows team standards.",
-                "citations": [DEFAULT_CITATIONS[category]],
-                "confidence": 0.72,
-            }
+    if analyze_request is None:
+        raise RuntimeError(
+            "RAG runtime import failed. "
+            f"Expected package under {RAG_SRC_ROOT}. Root cause: {IMPORT_ERROR}"
         )
 
-    return {
-        "suggestions": suggestions,
-        "partialFailures": 0,
-    }
+    return await analyze_request(request)
+
+
+async def get_rag_status() -> dict[str, Any]:
+    if not parse_bool(os.getenv("RAG_ENABLED"), default=True):
+        return {
+            "enabled": False,
+            "ready": True,
+            "message": "RAG disabled by configuration",
+        }
+
+    if analyze_request is None or runtime_status is None:
+        return {
+            "enabled": True,
+            "ready": False,
+            "message": (
+                "RAG runtime import failed. "
+                f"Expected package under {RAG_SRC_ROOT}. Root cause: {IMPORT_ERROR}"
+            ),
+        }
+
+    return await runtime_status()

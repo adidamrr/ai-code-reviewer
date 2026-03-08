@@ -7,6 +7,10 @@
     "start": "./.venv/bin/python main.py",
     "smoke:github-pr": "./.venv/bin/python scripts/github_smoke.py",
     "export:pr-mocks": "./.venv/bin/python scripts/export_pr_mocks.py",
+    "rag:pull-models": "ollama pull nomic-embed-text && ollama pull qwen2.5-coder:7b",
+    "rag:inventory": "./.venv/bin/python ../rag-ml/scripts/inventory.py",
+    "rag:build": "./.venv/bin/python ../rag-ml/scripts/build_indexes.py",
+    "rag:eval": "./.venv/bin/python ../rag-ml/scripts/eval_debug_prs.py",
     "single:build": "npm --prefix ../frontend run build",
     "single:start": "SERVE_FRONTEND=true FRONTEND_DIST_PATH=../frontend/dist ./.venv/bin/python main.py",
     "single:run": "npm run single:build && npm run single:start"

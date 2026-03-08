@@ -1,0 +1,7 @@
+{
+  "namespace": "security-pack",
+  "displayName": "Shared Security Pack",
+  "docRoots": ["docs"],
+  "sources": [],
+  "notes": "Placeholder namespace for local security docs. Production security retrieval stays disabled until real local sources are added."
+}
