@@ -741,6 +741,63 @@ button:disabled {
   align-items: center;
 }
 
+.analysis-launch-card {
+  border: 1px solid #d9e4f2;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  padding: 18px;
+  display: grid;
+  gap: 16px;
+}
+
+.analysis-launch-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.analysis-launch-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.analysis-launch-copy p,
+.analysis-launch-note p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.analysis-launch-note {
+  border: 1px solid #d8e5f5;
+  border-radius: 12px;
+  background: rgba(37, 99, 235, 0.05);
+  padding: 12px 14px;
+  display: grid;
+  gap: 6px;
+}
+
+.analysis-loader {
+  width: 52px;
+  height: 52px;
+  flex: 0 0 52px;
+  border-radius: 16px;
+  background: linear-gradient(145deg, rgba(37, 99, 235, 0.16), rgba(14, 165, 160, 0.14));
+  border: 1px solid rgba(37, 99, 235, 0.16);
+  display: grid;
+  place-items: center;
+}
+
+.analysis-loader::after {
+  content: "";
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 3px solid rgba(37, 99, 235, 0.18);
+  border-top-color: var(--accent);
+  animation: analysis-spin 0.8s linear infinite;
+}
+
 .console-card {
   border: 1px solid #1e293b;
   border-radius: 10px;
@@ -1275,6 +1332,12 @@ td p {
   background: transparent;
   color: inherit;
   padding: 4px 8px;
+}
+
+@keyframes analysis-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .activity-dock {

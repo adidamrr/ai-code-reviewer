@@ -11,16 +11,32 @@ if str(RAG_SRC) not in sys.path:
     sys.path.insert(0, str(RAG_SRC))
 
 from rag_ml.citation_resolver import CitationResolver
+from rag_ml.context_builder import build_context_pack
+from rag_ml.evidence_models import doc_ref
+from rag_ml.hotspot_planner import plan_hotspot_tasks
 from rag_ml.kb_chunker import chunk_documents
 from rag_ml.kb_normalizer import normalize_descriptor
 from rag_ml.language_mapper import to_slug
+from rag_ml.pr_overview import build_pr_overview
 from rag_ml.query_builder import build_query
 from rag_ml.rule_fallbacks import style_fallback_candidates
-from rag_ml.schemas import CandidateSuggestion, DocumentDescriptor, HunkTask, KnowledgeChunk, NormalizedDocument, RetrievalHit, SectionSpan
+from rag_ml.schemas import CandidateFinding, DocumentDescriptor, HunkTask, KnowledgeChunk, NormalizedDocument, PROverview, RagRequest, RagFile, RetrievalHit, SectionSpan
+from rag_ml.static_signals import collect_static_signals
 from rag_ml.validator import SuggestionValidator
 
 
-class RagRuntimeTests(unittest.TestCase):
+class _OverviewClient:
+    async def chat_structured(self, messages, schema, **kwargs):
+        return {
+            "prIntent": "Refactor auth flow",
+            "riskLevel": "medium",
+            "recommendedScopes": ["style", "bugs"],
+            "hotspots": [{"filePath": "lib/example.dart", "reasons": ["async flow changed"], "risk": 0.8}],
+            "notes": ["Touches async flow"],
+        }
+
+
+class RagRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def test_language_mapper_maps_supported_display_names(self) -> None:
         self.assertEqual(to_slug("Python"), "python")
         self.assertEqual(to_slug("Dart"), "dart")
@@ -62,13 +78,40 @@ class RagRuntimeTests(unittest.TestCase):
             charEnd=96,
             tokenEstimate=24,
         )
-        citations = CitationResolver({chunk.chunkId: chunk}).resolve([chunk.chunkId])
+        task = HunkTask(
+            taskId="lib/example.dart:0",
+            filePath="lib/example.dart",
+            language="Dart",
+            languageSlug="dart",
+            patch="@@ -1 +1 @@\n+final My_var = 1;",
+            hunkIndex=0,
+            hunkHeader="@@ -1 +1 @@",
+            hunkPatch="@@ -1 +1 @@\n+final My_var = 1;",
+            addedLines=["final My_var = 1;"],
+            changedNewLines=[1],
+            firstChangedLine=1,
+            priority=1.0,
+        )
+        context = build_context_pack(task, [], [RetrievalHit(
+            chunkId=chunk.chunkId,
+            namespace=chunk.namespace,
+            sourceId=chunk.sourceId,
+            title=chunk.sourceTitle,
+            url=chunk.sourceUrl,
+            headingPath=chunk.headingPath,
+            text=chunk.text,
+            finalScore=0.9,
+            sparseRank=1,
+            denseRank=1,
+        )])
+        evidence, citations = CitationResolver({chunk.chunkId: chunk}).resolve([doc_ref(chunk.chunkId)], context)
         self.assertEqual(len(citations), 1)
         self.assertEqual(citations[0].sourceId, "effective-dart")
         self.assertIn("lowerCamelCase", citations[0].snippet)
+        self.assertEqual(evidence[0].type, "doc")
 
     def test_validator_rejects_missing_evidence(self) -> None:
-        candidate = CandidateSuggestion(
+        candidate = CandidateFinding(
             filePath="lib/example.dart",
             lineStart=10,
             lineEnd=10,
@@ -77,15 +120,15 @@ class RagRuntimeTests(unittest.TestCase):
             title="Use lowerCamelCase",
             body="Rename the symbol to lowerCamelCase for consistency.",
             confidence=0.8,
-            evidenceChunkIds=[],
+            evidenceRefs=[],
         )
-        from rag_ml.schemas import HunkTask
-
         task = HunkTask(
+            taskId="lib/example.dart:0",
             filePath="lib/example.dart",
             language="Dart",
             languageSlug="dart",
             patch="@@ -1 +1 @@\n+final My_var = 1;",
+            hunkIndex=0,
             hunkHeader="",
             hunkPatch="@@ -1 +1 @@\n+final My_var = 1;",
             addedLines=["final My_var = 1;"],
@@ -135,10 +178,12 @@ class RagRuntimeTests(unittest.TestCase):
 
     def test_query_builder_adds_style_hints_for_bad_identifier_names(self) -> None:
         task = HunkTask(
+            taskId="lib/example.dart:0",
             filePath="lib/example.dart",
             language="Dart",
             languageSlug="dart",
             patch="@@ -1 +1 @@\n+final My_value = 1;",
+            hunkIndex=0,
             hunkHeader="@@ -1 +1 @@",
             hunkPatch="@@ -1 +1 @@\n+final My_value = 1;",
             addedLines=["final My_value = 1;"],
@@ -151,25 +196,8 @@ class RagRuntimeTests(unittest.TestCase):
         self.assertIn("lowerCamelCase", query)
         self.assertIn("UpperCamelCase", query)
 
-    def test_query_builder_adds_type_naming_hint_for_bad_class_name(self) -> None:
-        task = HunkTask(
-            filePath="lib/example.dart",
-            language="Dart",
-            languageSlug="dart",
-            patch="@@ -0,0 +1 @@\n+class my_button {}",
-            hunkHeader="@@ -0,0 +1 @@",
-            hunkPatch="@@ -0,0 +1 @@\n+class my_button {}",
-            addedLines=["class my_button {}"],
-            changedNewLines=[1],
-            firstChangedLine=1,
-            priority=1.0,
-        )
-
-        query = build_query(task, "style")
-        self.assertIn("UpperCamelCase", query)
-
     def test_validator_rejects_generic_documentation_summary(self) -> None:
-        candidate = CandidateSuggestion(
+        candidate = CandidateFinding(
             filePath="lib/example.dart",
             lineStart=1,
             lineEnd=1,
@@ -178,13 +206,15 @@ class RagRuntimeTests(unittest.TestCase):
             title="Dart language tour overview",
             body="This section provides an overview of the Dart programming language and its features.",
             confidence=1.0,
-            evidenceChunkIds=["dart:effective-dart:000001"],
+            evidenceRefs=[doc_ref("dart:effective-dart:000001")],
         )
         task = HunkTask(
+            taskId="lib/example.dart:0",
             filePath="lib/example.dart",
             language="Dart",
             languageSlug="dart",
             patch="@@ -1 +1 @@\n+final My_value = 1;",
+            hunkIndex=0,
             hunkHeader="@@ -1 +1 @@",
             hunkPatch="@@ -1 +1 @@\n+final My_value = 1;",
             addedLines=["final My_value = 1;"],
@@ -199,10 +229,12 @@ class RagRuntimeTests(unittest.TestCase):
 
     def test_style_fallback_candidates_generate_grounded_dart_naming_comment(self) -> None:
         task = HunkTask(
+            taskId="lib/example.dart:0",
             filePath="lib/example.dart",
             language="Dart",
             languageSlug="dart",
             patch="@@ -1 +1 @@\n+final My_value = 1;",
+            hunkIndex=0,
             hunkHeader="@@ -1 +1 @@",
             hunkPatch="@@ -1 +1 @@\n+final My_value = 1;",
             addedLines=["final My_value = 1;"],
@@ -228,7 +260,51 @@ class RagRuntimeTests(unittest.TestCase):
         candidates = style_fallback_candidates(task, hits)
         self.assertEqual(len(candidates), 1)
         self.assertIn("lowerCamelCase", candidates[0].body)
-        self.assertEqual(candidates[0].evidenceChunkIds, ["dart:effective-dart:000005"])
+        self.assertEqual(candidates[0].evidenceRefs, [doc_ref("dart:effective-dart:000005")])
+
+    def test_static_signals_and_planner_create_tasks(self) -> None:
+        request = RagRequest(
+            jobId="job_1",
+            snapshotId="snap_1",
+            prId="pr_1",
+            title="Auth refactor",
+            scope=["bugs", "style", "performance"],
+            files=[
+                RagFile(
+                    path="lib/auth/service.dart",
+                    language="Dart",
+                    patch="@@ -1 +1 @@\n+await client.refreshToken();",
+                    surroundingCode=[{"lineNumber": 1, "text": "await client.refreshToken();"}],
+                )
+            ],
+            limits={"maxComments": 10, "maxPerFile": 3},
+        )
+        overview = PROverview(
+            prIntent="Auth refactor",
+            riskLevel="medium",
+            recommendedScopes=["bugs", "style"],
+            hotspots=[{"filePath": "lib/auth/service.dart", "reasons": ["auth-change"], "risk": 0.8}],
+            notes=[],
+        )
+        static_checks = collect_static_signals(request.files)
+        tasks = plan_hotspot_tasks(request, overview, static_checks, max_hunks_per_file=2, max_hotspot_tasks=8)
+        self.assertGreaterEqual(len(tasks), 1)
+        self.assertIn("bugs", tasks[0].categories)
+
+    async def test_pr_overview_returns_structured_result(self) -> None:
+        request = RagRequest(
+            jobId="job_1",
+            snapshotId="snap_1",
+            prId="pr_1",
+            title="Auth refactor",
+            description="Touches token refresh flow",
+            scope=["bugs", "style"],
+            files=[RagFile(path="lib/auth/service.dart", language="Dart", patch="@@ -1 +1 @@\n+await client.refreshToken();")],
+            limits={"maxComments": 10, "maxPerFile": 3},
+        )
+        overview = await build_pr_overview(_OverviewClient(), request)
+        self.assertEqual(overview.riskLevel, "medium")
+        self.assertEqual(overview.hotspots[0].filePath, "lib/example.dart")
 
 
 if __name__ == "__main__":

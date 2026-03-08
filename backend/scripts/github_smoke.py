@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from typing import Any
 
 import httpx
@@ -161,6 +162,16 @@ def main() -> int:
         )
 
         results_headers = {"Authorization": f"Bearer {api_service_token}"} if api_service_token else None
+        deadline = time.time() + 15 * 60
+        while time.time() < deadline:
+            current_job = request_json(client, "GET", f"{backend_base_url}/analysis-jobs/{job['jobId']}", headers=results_headers)
+            if current_job["status"] in {"done", "failed", "canceled"}:
+                job = current_job
+                break
+            time.sleep(2)
+        else:
+            raise RuntimeError("Timeout ожидания завершения job (15m).")
+
         results = request_json(client, "GET", f"{backend_base_url}/analysis-jobs/{job['jobId']}/results", headers=results_headers)
 
         print(f"[8/8] Publishing (dryRun={publish_dry_run})...")

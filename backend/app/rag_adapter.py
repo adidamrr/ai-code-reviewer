@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 def parse_bool(value: str | None, *, default: bool = True) -> bool:
@@ -26,7 +26,10 @@ else:
     IMPORT_ERROR = None
 
 
-async def analyze_with_rag(request: dict[str, Any]) -> dict[str, Any]:
+async def analyze_with_rag(
+    request: dict[str, Any],
+    progress_callback: Callable[[dict[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
     if not parse_bool(os.getenv("RAG_ENABLED"), default=True):
         return {"suggestions": [], "partialFailures": 0}
 
@@ -36,7 +39,7 @@ async def analyze_with_rag(request: dict[str, Any]) -> dict[str, Any]:
             f"Expected package under {RAG_SRC_ROOT}. Root cause: {IMPORT_ERROR}"
         )
 
-    return await analyze_request(request)
+    return await analyze_request(request, progress_callback)
 
 
 async def get_rag_status() -> dict[str, Any]:

@@ -48,6 +48,11 @@ export interface AnalysisJobCreateResponse {
   progress: {
     filesDone: number;
     total: number;
+    stage?: "overview" | "static" | "planning" | "review" | "synthesis" | "ranking";
+    stageProgress?: {
+      done: number;
+      total: number;
+    };
   };
 }
 
@@ -61,6 +66,11 @@ export interface AnalysisJob {
   progress: {
     filesDone: number;
     total: number;
+    stage?: "overview" | "static" | "planning" | "review" | "synthesis" | "ranking";
+    stageProgress?: {
+      done: number;
+      total: number;
+    };
   };
   summary: {
     totalSuggestions: number;
@@ -79,6 +89,7 @@ export interface AnalysisJobEvent {
   level: "info" | "warn" | "error";
   message: string;
   filePath: string | null;
+  stage?: "overview" | "static" | "planning" | "review" | "synthesis" | "ranking" | null;
   meta: Record<string, unknown> | null;
   createdAt: string;
 }
@@ -88,6 +99,19 @@ export interface Citation {
   title: string;
   url: string;
   snippet: string;
+}
+
+export interface Evidence {
+  evidenceId: string;
+  type: "code" | "rule" | "doc" | "history";
+  title: string;
+  snippet: string;
+  filePath?: string | null;
+  lineStart?: number | null;
+  lineEnd?: number | null;
+  sourceId?: string | null;
+  url?: string | null;
+  metadata?: Record<string, unknown>;
 }
 
 export interface Suggestion {
@@ -100,8 +124,11 @@ export interface Suggestion {
   category: SuggestionScope;
   title: string;
   body: string;
+  deliveryMode?: "inline" | "summary";
+  evidence?: Evidence[];
   citations: Citation[];
   confidence: number;
+  meta?: Record<string, unknown>;
 }
 
 export interface PublishedComment {

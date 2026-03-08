@@ -3,16 +3,19 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from datetime import datetime, timezone
+from inspect import isawaitable
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import numpy as np
 
 from .citation_resolver import CitationResolver
 from .config import RagConfig, load_config
+from .context_builder import build_context_pack
 from .dense_index import build_dense_index, load_dense_index
+from .hotspot_planner import plan_hotspot_tasks
+from .pr_overview import build_pr_overview
 from .generator import SuggestionGenerator
-from .hunk_selector import select_hunks
 from .hybrid_retriever import HybridRetriever
 from .kb_chunker import chunk_documents
 from .kb_inventory import build_inventory, write_inventory
@@ -23,8 +26,20 @@ from .ollama_client import OllamaClient, OllamaError
 from .query_builder import build_query
 from .ranking import build_ranked_suggestion, dedupe_and_rank, fingerprint_for_suggestion
 from .rule_fallbacks import style_fallback_candidates
-from .schemas import BackendSuggestion, BuildManifest, BuildNamespaceMeta, KnowledgeChunk, RagRequest, RagResponse
+from .schemas import (
+    BackendSuggestion,
+    BuildManifest,
+    BuildNamespaceMeta,
+    ContextPack,
+    HunkTask,
+    KnowledgeChunk,
+    ProgressUpdate,
+    RagRequest,
+    RagResponse,
+)
 from .sparse_index import build_sparse_index, load_sparse_index
+from .static_signals import collect_static_signals
+from .synthesizer import synthesize_suggestions
 from .validator import SuggestionValidator
 
 
@@ -105,6 +120,44 @@ def load_chunk_store(config: RagConfig) -> dict[str, KnowledgeChunk]:
             chunk = KnowledgeChunk.model_validate(json.loads(line))
             chunks_by_id[chunk.chunkId] = chunk
     return chunks_by_id
+
+
+def _merge_hits(hit_groups: list[list], *, top_k: int) -> list:
+    best_by_chunk: dict[str, Any] = {}
+    for hits in hit_groups:
+        for hit in hits:
+            current = best_by_chunk.get(hit.chunkId)
+            if current is None or hit.finalScore > current.finalScore:
+                best_by_chunk[hit.chunkId] = hit
+    return sorted(best_by_chunk.values(), key=lambda item: item.finalScore, reverse=True)[:top_k]
+
+
+async def _emit_progress(
+    callback: Callable[[dict[str, Any]], Any] | None,
+    update: ProgressUpdate,
+) -> None:
+    if callback is None:
+        return
+    result = callback(update.model_dump())
+    if isawaitable(result):
+        await result
+
+
+def _effective_scope(config: RagConfig, request: RagRequest) -> set[str]:
+    requested_scope = {scope for scope in request.scope if scope in {"security", "bugs", "style", "performance"}}
+    if not config.enable_security and "security" in requested_scope:
+        requested_scope.remove("security")
+    if not config.enable_performance and "performance" in requested_scope:
+        requested_scope.remove("performance")
+    return requested_scope
+
+
+def _static_signals_for_task(static_checks, task: HunkTask) -> list:
+    return [
+        signal
+        for signal in [*static_checks.signals, *static_checks.toolFindings]
+        if signal.filePath == task.filePath
+    ]
 
 
 class RagRuntime:
@@ -272,110 +325,329 @@ async def runtime_status() -> dict[str, Any]:
     return status
 
 
-async def analyze_request(raw_request: dict) -> dict:
+async def analyze_request(
+    raw_request: dict,
+    progress_callback: Callable[[dict[str, Any]], Any] | None = None,
+) -> dict:
     config = load_config()
     request = RagRequest.model_validate(raw_request)
     runtime = _load_runtime(config)
     await runtime.client.ensure_models_available([config.embed_model, config.generation_model])
-    requested_scope = {scope for scope in request.scope if scope in {"security", "bugs", "style", "performance"}}
-    if not config.enable_security and "security" in requested_scope:
-        requested_scope.remove("security")
-    if not config.enable_performance and "performance" in requested_scope:
-        requested_scope.remove("performance")
+    requested_scope = _effective_scope(config, request)
     if not requested_scope:
-        return RagResponse(suggestions=[], partialFailures=0).model_dump()
+        return RagResponse(suggestions=[], partialFailures=0, meta={}).model_dump()
+
+    await _emit_progress(
+        progress_callback,
+        ProgressUpdate(
+            stage="overview",
+            message="Стартовал этап обзора pull request.",
+            stageDone=0,
+            stageTotal=1,
+            filesDone=0,
+            filesTotal=len(request.files),
+        ),
+    )
+    overview = await build_pr_overview(runtime.client, request)
+    await _emit_progress(
+        progress_callback,
+        ProgressUpdate(
+            stage="overview",
+            message="Обзор pull request завершен.",
+            stageDone=1,
+            stageTotal=1,
+            filesDone=0,
+            filesTotal=len(request.files),
+            meta={
+                "riskLevel": overview.riskLevel,
+                "hotspots": [item.model_dump() for item in overview.hotspots],
+                "recommendedScopes": overview.recommendedScopes,
+            },
+        ),
+    )
+
+    await _emit_progress(
+        progress_callback,
+        ProgressUpdate(
+            stage="static",
+            message="Запущен статический этап анализа.",
+            stageDone=0,
+            stageTotal=1,
+            filesDone=0,
+            filesTotal=len(request.files),
+        ),
+    )
+    static_checks = collect_static_signals(request.files)
+    await _emit_progress(
+        progress_callback,
+        ProgressUpdate(
+            stage="static",
+            message="Статический этап анализа завершен.",
+            stageDone=1,
+            stageTotal=1,
+            filesDone=0,
+            filesTotal=len(request.files),
+            meta={"signals": [item.model_dump() for item in static_checks.signals]},
+        ),
+    )
+
+    await _emit_progress(
+        progress_callback,
+        ProgressUpdate(
+            stage="planning",
+            message="Планирование hotspot-задач начато.",
+            stageDone=0,
+            stageTotal=1,
+            filesDone=0,
+            filesTotal=len(request.files),
+        ),
+    )
+    planned_tasks = plan_hotspot_tasks(
+        request,
+        overview,
+        static_checks,
+        max_hunks_per_file=config.max_hunks_per_file,
+        max_hotspot_tasks=config.max_hotspot_tasks,
+    )
+    await _emit_progress(
+        progress_callback,
+        ProgressUpdate(
+            stage="planning",
+            message="Hotspot-план построен.",
+            stageDone=1,
+            stageTotal=1,
+            filesDone=0,
+            filesTotal=len(request.files),
+            meta={
+                "taskCount": len(planned_tasks),
+                "tasks": [
+                    {
+                        "taskId": task.taskId,
+                        "filePath": task.filePath,
+                        "categories": task.categories,
+                        "priority": task.priority,
+                        "reasons": task.reasons,
+                    }
+                    for task in planned_tasks
+                ],
+            },
+        ),
+    )
 
     ranked_items = []
     candidate_buffer_by_file: dict[str, int] = defaultdict(int)
     partial_failures = 0
-    for file in request.files:
-        language_slug = to_slug(file.language)
-        if not language_slug or language_slug not in config.supported_languages:
-            partial_failures += 1
-            continue
-        if not runtime.has_namespace(language_slug):
-            partial_failures += 1
-            continue
-        if not file.patch.strip():
-            continue
+    files_done = 0
+    total_files = len({task.filePath for task in planned_tasks}) or len(request.files)
+    task_count_by_file: dict[str, int] = defaultdict(int)
+    completed_task_count_by_file: dict[str, int] = defaultdict(int)
+    completed_files: set[str] = set()
+    for task in planned_tasks:
+        task_count_by_file[task.filePath] += 1
 
-        file_failed = False
-        tasks = select_hunks(file, config.max_hunks_per_file)
-        for task in tasks:
-            for category in request.scope:
-                if category not in requested_scope:
-                    continue
-                if candidate_buffer_by_file[file.path] >= request.limits.maxPerFile * 2:
-                    break
-                namespaces = [language_slug]
+    def mark_task_complete(file_path: str) -> int:
+        nonlocal files_done
+        completed_task_count_by_file[file_path] += 1
+        if (
+            file_path not in completed_files
+            and completed_task_count_by_file[file_path] >= task_count_by_file.get(file_path, 1)
+        ):
+            completed_files.add(file_path)
+            files_done += 1
+        return files_done
+    for task_index, task in enumerate(planned_tasks, start=1):
+        if candidate_buffer_by_file[task.filePath] >= request.limits.maxPerFile * 2:
+            continue
+        await _emit_progress(
+            progress_callback,
+            ProgressUpdate(
+                stage="review",
+                message="Начат анализ hotspot-задачи.",
+                filePath=task.filePath,
+                stageDone=task_index - 1,
+                stageTotal=len(planned_tasks),
+                filesDone=files_done,
+                filesTotal=total_files,
+                meta={"taskId": task.taskId, "categories": task.categories},
+            ),
+        )
+        try:
+            if task.languageSlug not in config.supported_languages or not runtime.has_namespace(task.languageSlug):
+                partial_failures += 1
+                mark_task_complete(task.filePath)
+                continue
+            active_categories = [category for category in task.categories if category in requested_scope]
+            if not active_categories:
+                mark_task_complete(task.filePath)
+                continue
+
+            hits_by_category: dict[str, list[Any]] = {}
+            for category in active_categories:
+                namespaces = [task.languageSlug]
                 if category == "security" and config.enable_security and runtime.has_namespace("security-pack"):
                     namespaces.append("security-pack")
                 query_text = build_query(task, category)
-                try:
-                    query_vector = np.asarray((await runtime.client.embed_texts([query_text]))[0], dtype=np.float32)
-                    hits = runtime.retriever.search(namespaces, query_text, query_vector, top_k=config.default_topk)
-                    if len(hits) < 2:
-                        continue
-                    envelope = await runtime.generator.generate(task, category, hits)
-                    score_by_chunk = {hit.chunkId: hit.finalScore for hit in hits}
-                    accepted_any = False
-                    for candidate in envelope.suggestions:
-                        candidate = candidate.model_copy(update={"filePath": task.filePath, "category": category})
-                        validation = runtime.validator.validate(candidate, task, requested_scope)
-                        if not validation.valid:
-                            continue
-                        citations = runtime.citation_resolver.resolve(candidate.evidenceChunkIds)
-                        if not citations:
-                            continue
-                        retrieval_scores = [score_by_chunk.get(chunk_id, 0.0) for chunk_id in candidate.evidenceChunkIds]
-                        retrieval_score = sum(retrieval_scores) / len(retrieval_scores) if retrieval_scores else 0.0
-                        suggestion = BackendSuggestion(
-                            filePath=task.filePath,
-                            lineStart=validation.lineStart or task.firstChangedLine,
-                            lineEnd=validation.lineEnd or validation.lineStart or task.firstChangedLine,
-                            severity=candidate.severity,
-                            category=category,
-                            title=candidate.title.strip(),
-                            body=candidate.body.strip(),
-                            citations=citations,
-                            confidence=candidate.confidence,
-                            fingerprint="",
-                        )
-                        suggestion = suggestion.model_copy(update={"fingerprint": fingerprint_for_suggestion(suggestion)})
-                        ranked_items.append(build_ranked_suggestion(suggestion, retrieval_score))
-                        candidate_buffer_by_file[file.path] += 1
-                        accepted_any = True
-                    if not accepted_any and category == "style":
-                        for candidate in style_fallback_candidates(task, hits):
-                            validation = runtime.validator.validate(candidate, task, requested_scope)
-                            if not validation.valid:
-                                continue
-                            citations = runtime.citation_resolver.resolve(candidate.evidenceChunkIds)
-                            if not citations:
-                                continue
-                            retrieval_scores = [score_by_chunk.get(chunk_id, 0.0) for chunk_id in candidate.evidenceChunkIds]
-                            retrieval_score = sum(retrieval_scores) / len(retrieval_scores) if retrieval_scores else 0.0
-                            suggestion = BackendSuggestion(
-                                filePath=task.filePath,
-                                lineStart=validation.lineStart or task.firstChangedLine,
-                                lineEnd=validation.lineEnd or validation.lineStart or task.firstChangedLine,
-                                severity=candidate.severity,
-                                category=category,
-                                title=candidate.title.strip(),
-                                body=candidate.body.strip(),
-                                citations=citations,
-                                confidence=candidate.confidence,
-                                fingerprint="",
-                            )
-                            suggestion = suggestion.model_copy(update={"fingerprint": fingerprint_for_suggestion(suggestion)})
-                            ranked_items.append(build_ranked_suggestion(suggestion, retrieval_score))
-                            candidate_buffer_by_file[file.path] += 1
-                except Exception:
-                    file_failed = True
-                    continue
-        if file_failed:
-            partial_failures += 1
+                query_vector = np.asarray((await runtime.client.embed_texts([query_text]))[0], dtype=np.float32)
+                hits = runtime.retriever.search(namespaces, query_text, query_vector, top_k=config.default_topk)
+                if hits:
+                    hits_by_category[category] = hits
 
-    suggestions = dedupe_and_rank(ranked_items, request.limits.maxComments, request.limits.maxPerFile)
-    response = RagResponse(suggestions=suggestions, partialFailures=partial_failures)
+            merged_hits = _merge_hits(list(hits_by_category.values()), top_k=config.default_topk) if hits_by_category else []
+            signals = _static_signals_for_task(static_checks, task)
+            context_pack: ContextPack = build_context_pack(task, signals, merged_hits)
+            score_by_chunk = {hit.chunkId: hit.finalScore for hit in merged_hits}
+            max_suggestions = max(1, min(2, request.limits.maxPerFile * 2 - candidate_buffer_by_file[task.filePath]))
+            envelope = await runtime.generator.generate(
+                task,
+                active_categories,
+                context_pack,
+                max_suggestions=max_suggestions,
+            )
+
+            accepted_any = False
+            for candidate in envelope.suggestions:
+                candidate = candidate.model_copy(update={"filePath": task.filePath})
+                validation = runtime.validator.validate(candidate, task, requested_scope)
+                if not validation.valid:
+                    continue
+                evidence, citations = runtime.citation_resolver.resolve(candidate.evidenceRefs, context_pack)
+                if not evidence:
+                    continue
+                retrieval_scores = [score_by_chunk.get(ref.split(":", 1)[1], 0.0) for ref in candidate.evidenceRefs if ref.startswith("doc:")]
+                retrieval_score = sum(retrieval_scores) / len(retrieval_scores) if retrieval_scores else 0.0
+                suggestion = BackendSuggestion(
+                    filePath=task.filePath,
+                    lineStart=validation.lineStart or task.firstChangedLine,
+                    lineEnd=validation.lineEnd or validation.lineStart or task.firstChangedLine,
+                    severity=candidate.severity,
+                    category=candidate.category,
+                    title=candidate.title.strip(),
+                    body=candidate.body.strip(),
+                    evidence=evidence,
+                    citations=citations,
+                    confidence=candidate.confidence,
+                    fingerprint="",
+                    meta={"stageOrigin": "review", "taskId": task.taskId},
+                )
+                suggestion = suggestion.model_copy(update={"fingerprint": fingerprint_for_suggestion(suggestion)})
+                ranked_items.append(
+                    build_ranked_suggestion(
+                        suggestion,
+                        retrieval_score=retrieval_score,
+                        planner_priority=task.priority,
+                        static_support=min(1.0, len(signals) / 3.0),
+                        repo_feedback_score=0.0,
+                    )
+                )
+                candidate_buffer_by_file[task.filePath] += 1
+                accepted_any = True
+
+            if not accepted_any and "style" in hits_by_category:
+                for candidate in style_fallback_candidates(task, hits_by_category["style"]):
+                    validation = runtime.validator.validate(candidate, task, requested_scope)
+                    if not validation.valid:
+                        continue
+                    evidence, citations = runtime.citation_resolver.resolve(candidate.evidenceRefs, context_pack)
+                    if not evidence:
+                        continue
+                    retrieval_scores = [score_by_chunk.get(ref.split(":", 1)[1], 0.0) for ref in candidate.evidenceRefs if ref.startswith("doc:")]
+                    retrieval_score = sum(retrieval_scores) / len(retrieval_scores) if retrieval_scores else 0.0
+                    suggestion = BackendSuggestion(
+                        filePath=task.filePath,
+                        lineStart=validation.lineStart or task.firstChangedLine,
+                        lineEnd=validation.lineEnd or validation.lineStart or task.firstChangedLine,
+                        severity=candidate.severity,
+                        category=candidate.category,
+                        title=candidate.title.strip(),
+                        body=candidate.body.strip(),
+                        evidence=evidence,
+                        citations=citations,
+                        confidence=candidate.confidence,
+                        fingerprint="",
+                        meta={"stageOrigin": "fallback", "taskId": task.taskId},
+                    )
+                    suggestion = suggestion.model_copy(update={"fingerprint": fingerprint_for_suggestion(suggestion)})
+                    ranked_items.append(
+                        build_ranked_suggestion(
+                            suggestion,
+                            retrieval_score=retrieval_score,
+                            planner_priority=task.priority,
+                            static_support=min(1.0, len(signals) / 3.0),
+                            repo_feedback_score=0.0,
+                        )
+                    )
+                    candidate_buffer_by_file[task.filePath] += 1
+                    accepted_any = True
+
+            mark_task_complete(task.filePath)
+            await _emit_progress(
+                progress_callback,
+                ProgressUpdate(
+                    stage="review",
+                    message="Hotspot-задача обработана.",
+                    filePath=task.filePath,
+                    stageDone=task_index,
+                    stageTotal=len(planned_tasks),
+                    filesDone=files_done,
+                    filesTotal=total_files,
+                    meta={"taskId": task.taskId, "accepted": accepted_any},
+                ),
+            )
+        except Exception as error:
+            partial_failures += 1
+            mark_task_complete(task.filePath)
+            await _emit_progress(
+                progress_callback,
+                ProgressUpdate(
+                    stage="review",
+                    level="error",
+                    message=f"Ошибка анализа hotspot-задачи: {error}",
+                    filePath=task.filePath,
+                    stageDone=task_index,
+                    stageTotal=len(planned_tasks),
+                    filesDone=files_done,
+                    filesTotal=total_files,
+                    meta={"taskId": task.taskId},
+                ),
+            )
+
+    await _emit_progress(
+        progress_callback,
+        ProgressUpdate(
+            stage="synthesis",
+            message="Синтез и ранжирование результатов.",
+            stageDone=0,
+            stageTotal=1,
+            filesDone=files_done,
+            filesTotal=total_files,
+        ),
+    )
+    synthesized = synthesize_suggestions([item.suggestion for item in ranked_items])
+    suggestion_by_fingerprint = {suggestion.fingerprint: suggestion for suggestion in synthesized}
+    reranked_items = [
+        item.model_copy(update={"suggestion": suggestion_by_fingerprint.get(item.suggestion.fingerprint, item.suggestion)})
+        for item in ranked_items
+    ]
+    suggestions = dedupe_and_rank(reranked_items, request.limits.maxComments, request.limits.maxPerFile)
+    await _emit_progress(
+        progress_callback,
+        ProgressUpdate(
+            stage="ranking",
+            message="Результаты готовы.",
+            stageDone=1,
+            stageTotal=1,
+            filesDone=files_done,
+            filesTotal=total_files,
+            meta={"suggestions": len(suggestions), "partialFailures": partial_failures},
+        ),
+    )
+    response = RagResponse(
+        suggestions=suggestions,
+        partialFailures=partial_failures,
+        meta={
+            "overview": overview.model_dump(),
+            "taskCount": len(planned_tasks),
+            "staticSignals": len(static_checks.signals),
+        },
+    )
     return response.model_dump()

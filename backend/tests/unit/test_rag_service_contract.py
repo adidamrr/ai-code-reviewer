@@ -12,7 +12,18 @@ if str(RAG_SRC) not in sys.path:
     sys.path.insert(0, str(RAG_SRC))
 
 from rag_ml.config import RagConfig
-from rag_ml.schemas import BuildManifest, BuildNamespaceMeta, CandidateSuggestion, CandidateSuggestionEnvelope, Citation, RetrievalHit, ValidationResult
+from rag_ml.evidence_models import doc_ref
+from rag_ml.schemas import (
+    BuildManifest,
+    BuildNamespaceMeta,
+    CandidateFinding,
+    CandidateFindingEnvelope,
+    ContextPack,
+    ContextEvidenceCandidate,
+    Evidence,
+    RetrievalHit,
+    ValidationResult,
+)
 from rag_ml.service import analyze_request, runtime_status
 
 
@@ -22,6 +33,17 @@ class _FakeClient:
 
     async def embed_texts(self, texts):
         return [[0.1, 0.2, 0.3] for _ in texts]
+
+    async def chat_structured(self, messages, schema, **kwargs):
+        if "PROverview" in str(schema):
+            return {
+                "prIntent": "Refactor auth flow",
+                "riskLevel": "medium",
+                "recommendedScopes": ["style", "bugs"],
+                "hotspots": [{"filePath": "lib/example.dart", "reasons": ["heuristic-risk"], "risk": 0.8}],
+                "notes": ["Touches auth flow"],
+            }
+        return {"suggestions": []}
 
 
 class _FakeRetriever:
@@ -55,10 +77,11 @@ class _FakeRetriever:
 
 
 class _FakeGenerator:
-    async def generate(self, task, category, hits, **kwargs):
-        return CandidateSuggestionEnvelope(
+    async def generate(self, task, categories, context_pack, **kwargs):
+        category = categories[0]
+        return CandidateFindingEnvelope(
             suggestions=[
-                CandidateSuggestion(
+                CandidateFinding(
                     filePath=task.filePath,
                     lineStart=task.firstChangedLine,
                     lineEnd=task.firstChangedLine,
@@ -67,22 +90,43 @@ class _FakeGenerator:
                     title="Use lowerCamelCase for constants",
                     body="This identifier naming does not follow Dart style guidance.",
                     confidence=0.82,
-                    evidenceChunkIds=["dart:effective-dart:000001"],
+                    evidenceRefs=[doc_ref("dart:effective-dart:000001"), context_pack.codeEvidenceCandidates[0].refId],
                 )
             ]
         )
 
 
 class _FakeCitationResolver:
-    def resolve(self, evidence_ids):
-        return [
-            Citation(
-                sourceId="effective-dart",
-                title="Effective Dart",
-                url="https://dart.dev/guides/language/effective-dart",
-                snippet="Use lowerCamelCase for variables and function names.",
-            )
-        ]
+    def resolve(self, evidence_refs, context_pack):
+        return (
+            [
+                Evidence(
+                    evidenceId=context_pack.codeEvidenceCandidates[0].refId,
+                    type="code",
+                    title="Changed hunk",
+                    snippet="final My_var = 1;",
+                    filePath="lib/example.dart",
+                    lineStart=1,
+                    lineEnd=1,
+                ),
+                Evidence(
+                    evidenceId=doc_ref("dart:effective-dart:000001"),
+                    type="doc",
+                    title="Effective Dart",
+                    snippet="Use lowerCamelCase for variables and function names.",
+                    sourceId="effective-dart",
+                    url="https://dart.dev/guides/language/effective-dart",
+                ),
+            ],
+            [
+                {
+                    "sourceId": "effective-dart",
+                    "title": "Effective Dart",
+                    "url": "https://dart.dev/guides/language/effective-dart",
+                    "snippet": "Use lowerCamelCase for variables and function names.",
+                }
+            ],
+        )
 
 
 class _FakeValidator:
@@ -119,14 +163,17 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
             enable_security=False,
             enable_performance=True,
             default_topk=6,
-            max_hunks_per_file=3,
+            max_hunks_per_file=2,
+            max_hotspot_tasks=8,
             embed_batch_size=64,
             generation_max_tokens=256,
             ollama_timeout_seconds=30.0,
         )
         request = {
             "jobId": "job_1",
+            "prId": "pr_1",
             "snapshotId": "snap_1",
+            "title": "Refactor auth flow",
             "scope": ["style"],
             "files": [
                 {
@@ -135,6 +182,7 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
                     "patch": "@@ -1 +1 @@\n+final My_var = 1;",
                     "hunks": [],
                     "lineMap": [],
+                    "surroundingCode": [{"lineNumber": 1, "text": "final My_var = 1;"}],
                 }
             ],
             "limits": {"maxComments": 5, "maxPerFile": 3},
@@ -149,6 +197,7 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(suggestion["filePath"], "lib/example.dart")
         self.assertEqual(suggestion["category"], "style")
         self.assertEqual(suggestion["citations"][0]["sourceId"], "effective-dart")
+        self.assertGreaterEqual(len(suggestion["evidence"]), 1)
         self.assertTrue(suggestion["fingerprint"])
 
     async def test_runtime_status_reports_missing_primary_artifacts(self) -> None:
@@ -190,7 +239,8 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
                 enable_security=False,
                 enable_performance=True,
                 default_topk=6,
-                max_hunks_per_file=3,
+                max_hunks_per_file=2,
+                max_hotspot_tasks=8,
                 embed_batch_size=64,
                 generation_max_tokens=256,
                 ollama_timeout_seconds=30.0,

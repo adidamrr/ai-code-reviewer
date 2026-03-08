@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from .adaptation import rerank_suggestions
-from .diff_utils import count_patch_changes, detect_language, parse_unified_diff
+from .diff_utils import (
+    count_patch_changes,
+    detect_language,
+    extract_changed_symbols_from_patch,
+    extract_imports_from_patch,
+    extract_surrounding_code_from_patch,
+    parse_unified_diff,
+)
 from .errors import HttpError
 from .hashing import normalize_title, sha256
 from .pagination import paginate
@@ -84,6 +92,7 @@ class InMemoryStore:
         self.feedback_votes: dict[str, dict[str, Any]] = {}
         self.feedback_by_comment: dict[str, list[str]] = {}
         self.publish_runs: dict[str, dict[str, Any]] = {}
+        self.analysis_tasks: dict[str, asyncio.Task[Any]] = {}
         self.seed()
 
     def seed(self) -> None:
@@ -233,6 +242,9 @@ class InMemoryStore:
             "patch": "" if too_large else patch,
             "hunks": None if too_large else parsed["hunks"],
             "lineMap": None if too_large else parsed["lineMap"],
+            "imports": [] if too_large else extract_imports_from_patch(patch),
+            "changedSymbols": [] if too_large else extract_changed_symbols_from_patch(patch),
+            "surroundingCode": [] if too_large else extract_surrounding_code_from_patch(patch),
             "patchHash": sha256(patch),
             "isTooLarge": too_large,
             "createdAt": created_at,
@@ -384,7 +396,12 @@ class InMemoryStore:
             "scope": payload["scope"],
             "filesFilter": files_filter if files_filter else None,
             "maxComments": payload["maxComments"],
-            "progress": {"filesDone": 0, "total": len(files)},
+            "progress": {
+                "filesDone": 0,
+                "total": len(files),
+                "stage": "overview",
+                "stageProgress": {"done": 0, "total": 1},
+            },
             "summary": {
                 "totalSuggestions": 0,
                 "partialFailures": 0,
@@ -401,9 +418,60 @@ class InMemoryStore:
         self.job_events_by_job[job["id"]] = []
         self.suggestions_by_job[job["id"]] = []
 
-        self.append_job_event(job["id"], "info", "Задача анализа создана и поставлена в очередь.")
-        await self.run_analysis_job(job["id"], files)
+        self.append_job_event(job["id"], "info", "Задача анализа создана и поставлена в очередь.", stage="overview")
+        task = asyncio.create_task(self.run_analysis_job(job["id"], files))
+        self.analysis_tasks[job["id"]] = task
+        task.add_done_callback(lambda _task, current_job_id=job["id"]: self.analysis_tasks.pop(current_job_id, None))
         return self.get_job(job["id"])
+
+    def _store_generated_suggestions(self, job_id: str, suggestions_input: list[dict[str, Any]]) -> int:
+        job = self.jobs.get(job_id)
+        if not job:
+            return 0
+
+        created_at = now_iso()
+        created_count = 0
+        for suggestion_input in suggestions_input:
+            fingerprint = suggestion_input.get("fingerprint") or sha256(
+                f"{suggestion_input['filePath']}:{suggestion_input['lineStart']}:"
+                f"{suggestion_input['lineEnd']}:{normalize_title(suggestion_input['title'])}"
+            )
+
+            existing_ids = self.suggestions_by_job.get(job["id"], [])
+            duplicated = False
+            for suggestion_id in existing_ids:
+                suggestion = self.suggestions.get(suggestion_id)
+                if suggestion and suggestion["fingerprint"] == fingerprint:
+                    duplicated = True
+                    break
+            if duplicated:
+                continue
+
+            suggestion = {
+                "id": f"sug_{uuid4()}",
+                "jobId": job["id"],
+                "prId": job["prId"],
+                "snapshotId": job["snapshotId"],
+                "fingerprint": fingerprint,
+                "filePath": suggestion_input["filePath"],
+                "lineStart": suggestion_input["lineStart"],
+                "lineEnd": suggestion_input["lineEnd"],
+                "severity": suggestion_input["severity"],
+                "category": suggestion_input["category"],
+                "title": suggestion_input["title"],
+                "body": suggestion_input["body"],
+                "deliveryMode": suggestion_input.get("deliveryMode", "inline"),
+                "evidence": suggestion_input.get("evidence", []),
+                "citations": suggestion_input.get("citations", []),
+                "confidence": suggestion_input["confidence"],
+                "meta": suggestion_input.get("meta", {}),
+                "createdAt": created_at,
+            }
+            self.suggestions[suggestion["id"]] = suggestion
+            self.suggestions_by_job.setdefault(job["id"], []).append(suggestion["id"])
+            created_count += 1
+
+        return created_count
 
     async def run_analysis_job(self, job_id: str, files: list[dict[str, Any]]) -> None:
         job = self.jobs.get(job_id)
@@ -412,90 +480,125 @@ class InMemoryStore:
 
         job["status"] = "running"
         job["updatedAt"] = now_iso()
-        self.append_job_event(job["id"], "info", "Задача анализа запущена.")
+        self.append_job_event(job["id"], "info", "Задача анализа запущена.", stage="overview")
 
-        for index, file in enumerate(files):
-            if file.get("isTooLarge"):
+        partial_failures = 0
+        files_skipped = 0
+
+        try:
+            eligible_files = [file for file in files if not file.get("isTooLarge") and str(file.get("patch") or "").strip()]
+            files_skipped = len(files) - len(eligible_files)
+            if files_skipped:
+                for skipped in [file for file in files if file.get("isTooLarge")]:
+                    self.append_job_event(
+                        job["id"],
+                        "warn",
+                        "Файл пропущен из-за лимита размера patch.",
+                        skipped.get("path"),
+                        {"reason": "patch_too_large"},
+                        stage="review",
+                    )
+
+            pr = self.get_pr(job["prId"])
+
+            async def on_progress(update: dict[str, Any]) -> None:
+                current = self.jobs.get(job_id)
+                if not current:
+                    return
+                stage = update.get("stage") or current["progress"].get("stage") or "review"
+                current["progress"]["stage"] = stage
+                stage_done = update.get("stageDone")
+                stage_total = update.get("stageTotal")
+                current["progress"]["stageProgress"] = {
+                    "done": int(stage_done if stage_done is not None else current["progress"]["stageProgress"].get("done", 0)),
+                    "total": int(stage_total if stage_total is not None else current["progress"]["stageProgress"].get("total", 1)),
+                }
+                if update.get("filesDone") is not None:
+                    current["progress"]["filesDone"] = int(update["filesDone"])
+                if update.get("filesTotal") is not None:
+                    current["progress"]["total"] = int(update["filesTotal"])
+                current["updatedAt"] = now_iso()
                 self.append_job_event(
-                    job["id"],
-                    "warn",
-                    "Файл пропущен из-за лимита размера patch.",
-                    file.get("path"),
-                    {"index": index + 1, "total": len(files)},
+                    job_id,
+                    update.get("level", "info"),
+                    str(update.get("message") or ""),
+                    update.get("filePath"),
+                    update.get("meta"),
+                    stage=stage,
                 )
-            else:
+
+            request = {
+                "jobId": job["id"],
+                "prId": pr["id"],
+                "snapshotId": job["snapshotId"],
+                "title": pr["title"],
+                "description": "",
+                "baseSha": pr["baseSha"],
+                "headSha": pr["headSha"],
+                "scope": job["scope"],
+                "files": [
+                    {
+                        "path": file["path"],
+                        "language": file["language"],
+                        "patch": file["patch"],
+                        "hunks": file.get("hunks"),
+                        "lineMap": file.get("lineMap"),
+                        "imports": file.get("imports"),
+                        "changedSymbols": file.get("changedSymbols"),
+                        "surroundingCode": file.get("surroundingCode"),
+                    }
+                    for file in eligible_files
+                ],
+                "limits": {"maxComments": job["maxComments"], "maxPerFile": 3},
+            }
+
+            try:
+                result = await analyze_with_rag(request, on_progress)
+                created_count = self._store_generated_suggestions(job["id"], result["suggestions"])
+                partial_failures += int(result.get("partialFailures", 0))
+                meta = result.get("meta", {})
                 self.append_job_event(
                     job["id"],
                     "info",
-                    "Файл передан в анализ.",
-                    file.get("path"),
-                    {"index": index + 1, "total": len(files)},
+                    "Анализ pull request завершил все стадии.",
+                    None,
+                    {
+                        "createdSuggestions": created_count,
+                        "partialFailures": int(result.get("partialFailures", 0)),
+                        "taskCount": meta.get("taskCount"),
+                    },
+                    stage="ranking",
                 )
-
-        request = {
-            "jobId": job["id"],
-            "snapshotId": job["snapshotId"],
-            "scope": job["scope"],
-            "files": [
-                {
-                    "path": item["path"],
-                    "language": item["language"],
-                    "patch": item["patch"],
-                    "hunks": item.get("hunks"),
-                    "lineMap": item.get("lineMap"),
-                }
-                for item in files
-            ],
-            "limits": {"maxComments": job["maxComments"], "maxPerFile": 3},
-        }
-
-        try:
-            result = await analyze_with_rag(request)
-            created_at = now_iso()
-
-            for suggestion_input in result["suggestions"]:
-                fingerprint = suggestion_input.get("fingerprint") or sha256(
-                    f"{suggestion_input['filePath']}:{suggestion_input['lineStart']}:"
-                    f"{suggestion_input['lineEnd']}:{normalize_title(suggestion_input['title'])}"
+            except asyncio.CancelledError:
+                job["status"] = "canceled"
+                job["updatedAt"] = now_iso()
+                self.append_job_event(job["id"], "warn", "Задача отменена пользователем.", stage="review")
+                return
+            except Exception as error:
+                partial_failures += 1
+                self.append_job_event(
+                    job["id"],
+                    "error",
+                    f"Ошибка анализа PR: {error}",
+                    None,
+                    None,
+                    stage=job["progress"].get("stage", "review"),
                 )
+                raise
 
-                existing_ids = self.suggestions_by_job.get(job["id"], [])
-                duplicated = False
-                for suggestion_id in existing_ids:
-                    suggestion = self.suggestions.get(suggestion_id)
-                    if suggestion and suggestion["fingerprint"] == fingerprint:
-                        duplicated = True
-                        break
-                if duplicated:
-                    continue
+            job = self.jobs.get(job_id)
+            if not job or job["status"] == "canceled":
+                return
 
-                suggestion = {
-                    "id": f"sug_{uuid4()}",
-                    "jobId": job["id"],
-                    "prId": job["prId"],
-                    "snapshotId": job["snapshotId"],
-                    "fingerprint": fingerprint,
-                    "filePath": suggestion_input["filePath"],
-                    "lineStart": suggestion_input["lineStart"],
-                    "lineEnd": suggestion_input["lineEnd"],
-                    "severity": suggestion_input["severity"],
-                    "category": suggestion_input["category"],
-                    "title": suggestion_input["title"],
-                    "body": suggestion_input["body"],
-                    "citations": suggestion_input["citations"],
-                    "confidence": suggestion_input["confidence"],
-                    "createdAt": created_at,
-                }
-                self.suggestions[suggestion["id"]] = suggestion
-                self.suggestions_by_job.setdefault(job["id"], []).append(suggestion["id"])
-
-            job["progress"]["filesDone"] = job["progress"]["total"]
             job["summary"]["totalSuggestions"] = len(self.suggestions_by_job.get(job["id"], []))
-            job["summary"]["partialFailures"] = result["partialFailures"]
-            job["summary"]["filesSkipped"] = len([item for item in files if item.get("isTooLarge")])
-            if job["summary"]["filesSkipped"] > 0:
+            job["summary"]["partialFailures"] = partial_failures
+            job["summary"]["filesSkipped"] = files_skipped
+            job["summary"]["warnings"] = []
+            if files_skipped > 0:
                 job["summary"]["warnings"].append("Some files were skipped due to patch size limits.")
             job["status"] = "done"
+            job["progress"]["stage"] = "ranking"
+            job["progress"]["stageProgress"] = {"done": 1, "total": 1}
             job["updatedAt"] = now_iso()
             self.append_job_event(
                 job["id"],
@@ -507,12 +610,22 @@ class InMemoryStore:
                     "partialFailures": job["summary"]["partialFailures"],
                     "filesSkipped": job["summary"]["filesSkipped"],
                 },
+                stage="ranking",
             )
+        except asyncio.CancelledError:
+            job = self.jobs.get(job_id)
+            if job:
+                job["status"] = "canceled"
+                job["updatedAt"] = now_iso()
+                self.append_job_event(job["id"], "warn", "Задача отменена пользователем.", stage=job["progress"].get("stage"))
+            return
         except Exception as error:
-            job["status"] = "failed"
-            job["errorMessage"] = str(error)
-            job["updatedAt"] = now_iso()
-            self.append_job_event(job["id"], "error", job["errorMessage"])
+            job = self.jobs.get(job_id)
+            if job:
+                job["status"] = "failed"
+                job["errorMessage"] = str(error)
+                job["updatedAt"] = now_iso()
+                self.append_job_event(job["id"], "error", job["errorMessage"], stage=job["progress"].get("stage"))
 
     def list_pr_analysis_jobs(self, pr_id: str, cursor: Any, limit: Any) -> dict[str, Any]:
         self.get_pr(pr_id)
@@ -534,6 +647,9 @@ class InMemoryStore:
         job["status"] = "canceled"
         job["updatedAt"] = now_iso()
         self.append_job_event(job_id, "warn", "Задача отменена пользователем.")
+        task = self.analysis_tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
         return job
 
     def list_job_events(self, job_id: str, cursor: Any, limit: Any) -> dict[str, Any]:
@@ -582,7 +698,11 @@ class InMemoryStore:
             }
 
         suggestion_ids = self.suggestions_by_job.get(job["id"], [])
-        suggestions = [self.suggestions[item_id] for item_id in suggestion_ids if item_id in self.suggestions]
+        suggestions = [
+            self.suggestions[item_id]
+            for item_id in suggestion_ids
+            if item_id in self.suggestions and self.suggestions[item_id].get("deliveryMode", "inline") == "inline"
+        ]
 
         run = {
             "id": f"pubrun_{uuid4()}",
@@ -790,6 +910,7 @@ class InMemoryStore:
         message: str,
         file_path: str | None = None,
         meta: dict[str, Any] | None = None,
+        stage: str | None = None,
     ) -> None:
         event = {
             "id": f"evt_{uuid4()}",
@@ -797,6 +918,7 @@ class InMemoryStore:
             "level": level,
             "message": message,
             "filePath": file_path,
+            "stage": stage,
             "meta": meta,
             "createdAt": now_iso(),
         }

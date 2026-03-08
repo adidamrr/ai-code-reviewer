@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from collections import defaultdict
 
-from .schemas import BackendSuggestion, RankedSuggestion
+from .schemas import BackendSuggestion, Evidence, RankedSuggestion
 from .validator import normalize_title
 
 SEVERITY_WEIGHTS = {
@@ -12,12 +12,6 @@ SEVERITY_WEIGHTS = {
     "medium": 0.6,
     "low": 0.4,
     "info": 0.2,
-}
-CATEGORY_PRIORITY = {
-    "security": 1.0,
-    "bugs": 0.85,
-    "performance": 0.75,
-    "style": 0.6,
 }
 
 
@@ -29,16 +23,49 @@ def fingerprint_for_suggestion(suggestion: BackendSuggestion) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def build_ranked_suggestion(suggestion: BackendSuggestion, retrieval_score: float) -> RankedSuggestion:
+def evidence_strength(evidence: list[Evidence]) -> float:
+    types = {item.type for item in evidence}
+    if "code" in types and "rule" in types:
+        return 1.0
+    if "code" in types and "doc" in types:
+        return 0.9
+    if "code" in types:
+        return 0.8
+    if "rule" in types:
+        return 0.7
+    if "doc" in types:
+        return 0.55
+    return 0.3
+
+
+def build_ranked_suggestion(
+    suggestion: BackendSuggestion,
+    *,
+    retrieval_score: float,
+    planner_priority: float,
+    static_support: float,
+    repo_feedback_score: float,
+) -> RankedSuggestion:
     severity_weight = SEVERITY_WEIGHTS.get(suggestion.severity, 0.2)
-    category_priority = CATEGORY_PRIORITY.get(suggestion.category, 0.5)
+    ev_strength = evidence_strength(suggestion.evidence)
     rank_score = (
-        0.45 * suggestion.confidence
-        + 0.25 * retrieval_score
-        + 0.20 * severity_weight
-        + 0.10 * category_priority
+        0.30 * suggestion.confidence
+        + 0.25 * ev_strength
+        + 0.20 * planner_priority
+        + 0.15 * static_support
+        + 0.10 * max(-1.0, min(1.0, repo_feedback_score / 5.0))
+        + 0.05 * retrieval_score
+        + 0.05 * severity_weight
     )
-    return RankedSuggestion(suggestion=suggestion, rankScore=rank_score, retrievalScore=retrieval_score)
+    return RankedSuggestion(
+        suggestion=suggestion,
+        rankScore=rank_score,
+        retrievalScore=retrieval_score,
+        evidenceStrength=ev_strength,
+        plannerPriority=planner_priority,
+        staticSupport=static_support,
+        repoFeedbackScore=repo_feedback_score,
+    )
 
 
 def dedupe_and_rank(items: list[RankedSuggestion], max_comments: int, max_per_file: int) -> list[BackendSuggestion]:
@@ -53,10 +80,11 @@ def dedupe_and_rank(items: list[RankedSuggestion], max_comments: int, max_per_fi
     selected: list[BackendSuggestion] = []
     for item in ranked:
         file_path = item.suggestion.filePath
-        if per_file_count[file_path] >= max_per_file:
+        if item.suggestion.deliveryMode == "inline" and per_file_count[file_path] >= max_per_file:
             continue
         selected.append(item.suggestion)
-        per_file_count[file_path] += 1
+        if item.suggestion.deliveryMode == "inline":
+            per_file_count[file_path] += 1
         if len(selected) >= max_comments:
             break
     return selected

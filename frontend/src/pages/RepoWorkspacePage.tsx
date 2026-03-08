@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ApiClient } from "../lib/api";
-import { useAppStore, ALL_SCOPES, JOB_STATUS_LABELS, SCOPE_LABELS, SEVERITY_LABELS, STEP_LABELS, WORKSPACE_STEPS } from "../store/app-store";
+import { useAppStore, ALL_SCOPES, JOB_STAGE_LABELS, JOB_STATUS_LABELS, SCOPE_LABELS, SEVERITY_LABELS, STEP_LABELS, WORKSPACE_STEPS } from "../store/app-store";
 import type { Suggestion } from "../types";
 
 export function RepoWorkspacePage() {
@@ -40,7 +40,7 @@ export function RepoWorkspacePage() {
   }, [actions, repoId]);
 
   useEffect(() => {
-    if (!repoId || !workflow?.job) {
+    if (!repoId || !workflow?.job || workflow.jobBooting) {
       return;
     }
     if (workflow.activeStep !== "job") {
@@ -132,6 +132,9 @@ export function RepoWorkspacePage() {
     return true;
   });
 
+  const inlineSuggestions = filteredSuggestions.filter((item) => (item.deliveryMode ?? "inline") === "inline");
+  const summarySuggestions = filteredSuggestions.filter((item) => item.deliveryMode === "summary");
+
   const severityCounts = useMemo(() => ({
     critical: suggestionsForSeverityCounts.filter((item) => item.severity === "critical").length,
     high: suggestionsForSeverityCounts.filter((item) => item.severity === "high").length,
@@ -148,9 +151,9 @@ export function RepoWorkspacePage() {
   }), [suggestionsForCategoryCounts]);
 
   const groupedSuggestions = useMemo(() => {
-    const grouped = new Map<string, typeof filteredSuggestions>();
+    const grouped = new Map<string, typeof inlineSuggestions>();
 
-    for (const suggestion of filteredSuggestions) {
+    for (const suggestion of inlineSuggestions) {
       if (!grouped.has(suggestion.filePath)) {
         grouped.set(suggestion.filePath, []);
       }
@@ -163,9 +166,13 @@ export function RepoWorkspacePage() {
         items: items.sort((a, b) => a.lineStart - b.lineStart),
       }))
       .sort((a, b) => a.filePath.localeCompare(b.filePath));
-  }, [filteredSuggestions]);
+  }, [inlineSuggestions]);
 
   const selectedVisibleCount = filteredSuggestions.filter((item) => workflow.selectedSuggestionIds.includes(item.id)).length;
+  const enabledScopes = ALL_SCOPES.filter((item) => workflow.scope[item]);
+  const bootStartedLabel = workflow.jobBootStartedAt
+    ? new Date(workflow.jobBootStartedAt).toLocaleTimeString("ru-RU")
+    : null;
 
   const activeSuggestion =
     filteredSuggestions.find((item) => item.id === workflow.activeSuggestionId) ??
@@ -415,13 +422,74 @@ export function RepoWorkspacePage() {
         <section className="card stack-gap">
           <div className="job-head">
             <div>
-              <h2>Выполнение job</h2>
-              <p className="subline">{workflow.job ? `jobId: ${workflow.job.id}` : "job не создан"}</p>
+              <h2>{workflow.jobBooting ? "Запуск анализа" : "Выполнение job"}</h2>
+              <p className="subline">
+                {workflow.jobBooting
+                  ? "Создаем analysis job и подготавливаем первый прогон. Для больших PR это может занять несколько минут."
+                  : workflow.job
+                    ? `jobId: ${workflow.job.id}`
+                    : "job не создан"}
+              </p>
             </div>
-            {workflow.job ? <span className={`status-badge ${workflow.job.status === "done" ? "ok" : "warn"}`}>{JOB_STATUS_LABELS[workflow.job.status]}</span> : null}
+            {workflow.jobBooting ? (
+              <span className="status-badge warn">запуск</span>
+            ) : workflow.job ? (
+              <span className={`status-badge ${workflow.job.status === "done" ? "ok" : "warn"}`}>{JOB_STATUS_LABELS[workflow.job.status]}</span>
+            ) : null}
           </div>
 
-          {workflow.job ? (
+          {workflow.jobBooting ? (
+            <article className="analysis-launch-card">
+              <div className="analysis-launch-top">
+                <div className="analysis-loader" aria-hidden="true" />
+                <div className="analysis-launch-copy">
+                  <h3>Анализ запущен и backend сейчас работает</h3>
+                  <p>
+                    Сервис не упал. Сервер синхронно создает job и начинает обработку файлов. Для крупных PR
+                    старт может занимать 2-15 минут до появления первых результатов.
+                  </p>
+                </div>
+              </div>
+
+              <div className="kpi-grid">
+                <article className="kpi-card">
+                  <span>файлов в snapshot</span>
+                  <strong>{workflow.syncData?.counts.files ?? workflow.job?.progress.total ?? 0}</strong>
+                </article>
+                <article className="kpi-card">
+                  <span>области анализа</span>
+                  <strong>{enabledScopes.map((scope) => SCOPE_LABELS[scope]).join(", ")}</strong>
+                </article>
+                <article className="kpi-card">
+                  <span>max comments</span>
+                  <strong>{workflow.maxComments}</strong>
+                </article>
+                <article className="kpi-card">
+                  <span>старт</span>
+                  <strong>{bootStartedLabel ?? "сейчас"}</strong>
+                </article>
+              </div>
+
+              <div className="analysis-launch-note">
+                <strong>Что происходит сейчас</strong>
+                <p>
+                  Идет создание analysis job, после чего интерфейс автоматически покажет обычный экран job со статусом,
+                  событиями и затем результаты.
+                </p>
+              </div>
+
+              <div className="console-card">
+                {workflow.jobEvents.map((event) => (
+                  <div key={event.id} className={`console-line ${event.level}`}>
+                    <span>{new Date(event.createdAt).toLocaleTimeString("ru-RU")}</span>
+                    <span>{event.stage ? `[${JOB_STAGE_LABELS[event.stage]}]` : ""}</span>
+                    <span>{event.filePath ? `[${event.filePath}]` : ""}</span>
+                    <span>{event.message}</span>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ) : workflow.job ? (
             <>
               <div className="kpi-grid">
                 <article className="kpi-card">
@@ -429,16 +497,26 @@ export function RepoWorkspacePage() {
                   <strong>{workflow.job.progress.filesDone}/{workflow.job.progress.total}</strong>
                 </article>
                 <article className="kpi-card">
+                  <span>stage</span>
+                  <strong>{workflow.job.progress.stage ? JOB_STAGE_LABELS[workflow.job.progress.stage] : "не указан"}</strong>
+                </article>
+                <article className="kpi-card">
+                  <span>stage progress</span>
+                  <strong>
+                    {workflow.job.progress.stageProgress?.done ?? 0}/{workflow.job.progress.stageProgress?.total ?? 0}
+                  </strong>
+                </article>
+                <article className="kpi-card">
                   <span>suggestions</span>
                   <strong>{workflow.job.summary.totalSuggestions}</strong>
                 </article>
                 <article className="kpi-card">
-                  <span>partial failures</span>
-                  <strong>{workflow.job.summary.partialFailures}</strong>
-                </article>
-                <article className="kpi-card">
                   <span>updated</span>
                   <strong>{new Date(workflow.job.updatedAt).toLocaleTimeString("ru-RU")}</strong>
+                </article>
+                <article className="kpi-card">
+                  <span>partial failures</span>
+                  <strong>{workflow.job.summary.partialFailures}</strong>
                 </article>
               </div>
 
@@ -457,6 +535,7 @@ export function RepoWorkspacePage() {
                 {workflow.jobEvents.map((event) => (
                   <div key={event.id} className={`console-line ${event.level}`}>
                     <span>{new Date(event.createdAt).toLocaleTimeString("ru-RU")}</span>
+                    <span>{event.stage ? `[${JOB_STAGE_LABELS[event.stage]}]` : ""}</span>
                     <span>{event.filePath ? `[${event.filePath}]` : ""}</span>
                     <span>{event.message}</span>
                   </div>
@@ -564,7 +643,11 @@ export function RepoWorkspacePage() {
               <div className="row-actions">
                 <button className="secondary-btn" onClick={() => actions.selectAllSuggestions(repo.repoId)}>Выбрать все</button>
                 <button className="secondary-btn" onClick={() => actions.clearSuggestionSelection(repo.repoId)}>Снять выбор</button>
-                <button className="primary-btn" onClick={() => actions.setActiveStep(repo.repoId, "publish")} disabled={workflow.suggestions.length === 0}>
+                <button
+                  className="primary-btn"
+                  onClick={() => actions.setActiveStep(repo.repoId, "publish")}
+                  disabled={!workflow.suggestions.some((item) => (item.deliveryMode ?? "inline") === "inline")}
+                >
                   К публикации
                 </button>
               </div>
@@ -572,6 +655,31 @@ export function RepoWorkspacePage() {
           </div>
 
           <div className="result-left results-list-panel">
+            {summarySuggestions.length > 0 ? (
+              <div className="file-group">
+                <div className="file-group-header">
+                  <span>PR summary findings</span>
+                  <span>{summarySuggestions.length}</span>
+                </div>
+                {summarySuggestions.map((item) => (
+                  <button
+                    key={item.id}
+                    className={`suggestion-item ux ${workflow.activeSuggestionId === item.id ? "active" : ""}`}
+                    onClick={() => actions.setActiveSuggestion(repo.repoId, item.id)}
+                  >
+                    <div className="suggestion-item-head">
+                      <span className={`severity-pill ${item.severity}`}>{SEVERITY_LABELS[item.severity]}</span>
+                      <span className={`category-pill ${item.category}`}>{SCOPE_LABELS[item.category]}</span>
+                      <span className="status-badge warn">summary</span>
+                    </div>
+                    <strong>{item.title}</strong>
+                    <p className="suggestion-snippet">{item.body}</p>
+                    <p className="suggestion-footnote">Evidence: {item.evidence?.length ?? 0}</p>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
             {groupedSuggestions.map((group) => (
               <div className="file-group" key={group.filePath}>
                 <div className="file-group-header">
@@ -593,16 +701,18 @@ export function RepoWorkspacePage() {
                         <span className={`severity-pill ${item.severity}`}>{SEVERITY_LABELS[item.severity]}</span>
                         <span className={`category-pill ${item.category}`}>{SCOPE_LABELS[item.category]}</span>
                         <span className="mono">L{item.lineStart}-{item.lineEnd}</span>
+                        {item.deliveryMode === "summary" ? <span className="status-badge warn">summary</span> : null}
                         <input
                           type="checkbox"
                           checked={selected}
+                          disabled={item.deliveryMode === "summary"}
                           onChange={() => actions.toggleSuggestionSelection(repo.repoId, item.id)}
                           onClick={(event) => event.stopPropagation()}
                         />
                       </div>
                       <strong>{item.title}</strong>
                       <p className="suggestion-snippet">{item.body}</p>
-                      <p className="suggestion-footnote">Источников: {item.citations.length}</p>
+                      <p className="suggestion-footnote">Evidence: {item.evidence?.length ?? 0} · Источников: {item.citations.length}</p>
                     </button>
                   );
                 })}
@@ -620,6 +730,9 @@ export function RepoWorkspacePage() {
                     <div className="detail-badges">
                       <span className={`severity-pill ${activeSuggestion.severity}`}>{SEVERITY_LABELS[activeSuggestion.severity]}</span>
                       <span className={`category-pill ${activeSuggestion.category}`}>{SCOPE_LABELS[activeSuggestion.category]}</span>
+                      <span className={`status-badge ${(activeSuggestion.deliveryMode ?? "inline") === "inline" ? "ok" : "warn"}`}>
+                        {(activeSuggestion.deliveryMode ?? "inline") === "inline" ? "inline" : "summary"}
+                      </span>
                     </div>
                     <span className="mono">confidence {Math.round(activeSuggestion.confidence * 100)}%</span>
                   </div>
@@ -655,15 +768,23 @@ export function RepoWorkspacePage() {
                 </article>
 
                 <section className="citation-box detail-citation-card">
-                  <h4>Источники и документация</h4>
-                  {activeSuggestion.citations.length === 0 ? (
-                    <p className="empty-note">Для этой рекомендации citations пока отсутствуют.</p>
+                  <h4>Evidence</h4>
+                  {(activeSuggestion.evidence?.length ?? 0) === 0 ? (
+                    <p className="empty-note">Для этой рекомендации evidence пока отсутствует.</p>
                   ) : null}
-                  {activeSuggestion.citations.map((citation) => (
-                    <a key={citation.sourceId} href={citation.url} target="_blank" rel="noreferrer" className="citation-link">
-                      <strong>{citation.title}</strong>
-                      <span>{citation.snippet}</span>
-                    </a>
+                  {activeSuggestion.evidence?.map((item) => (
+                    item.type === "doc" && item.url ? (
+                      <a key={item.evidenceId} href={item.url} target="_blank" rel="noreferrer" className="citation-link">
+                        <strong>{item.type === "doc" ? "Документация" : item.type}: {item.title}</strong>
+                        <span>{item.snippet}</span>
+                      </a>
+                    ) : (
+                      <article key={item.evidenceId} className="citation-link evidence-block">
+                        <strong>{item.type === "code" ? "Код" : item.type === "rule" ? "Правило" : item.type}: {item.title}</strong>
+                        <span>{item.snippet}</span>
+                        {item.filePath ? <span className="mono">{item.filePath}:{item.lineStart ?? "?"}-{item.lineEnd ?? item.lineStart ?? "?"}</span> : null}
+                      </article>
+                    )
                   ))}
                 </section>
               </>
@@ -678,7 +799,7 @@ export function RepoWorkspacePage() {
         <section className="card stack-gap">
           <h2>Публикация комментариев</h2>
           <p className="subline">
-            Выбрано в UI: {workflow.selectedSuggestionIds.length} из {workflow.suggestions.length}. В текущем backend MVP публикуются все suggestions job.
+            Выбрано в UI: {workflow.selectedSuggestionIds.length} из {inlineSuggestions.length}. В текущем backend MVP публикуются все inline suggestions job.
           </p>
 
           <label className="field">

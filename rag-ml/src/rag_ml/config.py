@@ -43,6 +43,7 @@ class RagConfig:
     enable_performance: bool
     default_topk: int
     max_hunks_per_file: int
+    max_hotspot_tasks: int
     embed_batch_size: int
     generation_max_tokens: int
     ollama_timeout_seconds: float
@@ -70,10 +71,11 @@ def load_config() -> RagConfig:
         experimental_languages=EXPERIMENTAL_LANGUAGES,
         enable_security=parse_bool(os.getenv("RAG_ENABLE_SECURITY"), default=False),
         enable_performance=parse_bool(os.getenv("RAG_ENABLE_PERFORMANCE"), default=True),
-        default_topk=max(1, int(os.getenv("RAG_DEFAULT_TOPK", "6"))),
-        max_hunks_per_file=max(1, int(os.getenv("RAG_MAX_HUNKS_PER_FILE", "3"))),
+        default_topk=max(1, int(os.getenv("RAG_DEFAULT_TOPK", "4"))),
+        max_hunks_per_file=max(1, int(os.getenv("RAG_MAX_HUNKS_PER_FILE", "2"))),
+        max_hotspot_tasks=max(1, int(os.getenv("RAG_MAX_HOTSPOT_TASKS", "8"))),
         embed_batch_size=max(1, int(os.getenv("RAG_EMBED_BATCH_SIZE", "64"))),
-        generation_max_tokens=max(64, int(os.getenv("RAG_GENERATION_MAX_TOKENS", "256"))),
+        generation_max_tokens=max(64, int(os.getenv("RAG_GENERATION_MAX_TOKENS", "160"))),
         ollama_timeout_seconds=float(os.getenv("RAG_OLLAMA_TIMEOUT_SECONDS", "120")),
     )
     return _CONFIG

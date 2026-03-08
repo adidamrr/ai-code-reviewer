@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -133,12 +133,20 @@ class RagHunk(Model):
     header: str | None = None
 
 
+class RagCodeContextLine(Model):
+    lineNumber: int
+    text: str
+
+
 class RagFile(Model):
     path: str
     language: str
     patch: str
     hunks: list[RagHunk] | None = None
     lineMap: list[RagLineMapEntry] | None = None
+    imports: list[str] = Field(default_factory=list)
+    changedSymbols: list[str] = Field(default_factory=list)
+    surroundingCode: list[RagCodeContextLine] = Field(default_factory=list)
 
 
 class RagLimits(Model):
@@ -149,6 +157,11 @@ class RagLimits(Model):
 class RagRequest(Model):
     jobId: str
     snapshotId: str
+    prId: str | None = None
+    title: str | None = None
+    description: str | None = None
+    baseSha: str | None = None
+    headSha: str | None = None
     scope: list[str]
     files: list[RagFile]
     limits: RagLimits
@@ -167,7 +180,67 @@ class RetrievalHit(Model):
     denseRank: int | None = None
 
 
-class CandidateSuggestion(Model):
+class PROverviewHotspot(Model):
+    filePath: str
+    reasons: list[str]
+    risk: float
+
+
+class PROverview(Model):
+    prIntent: str
+    riskLevel: Literal["low", "medium", "high"]
+    recommendedScopes: list[str] = Field(default_factory=list)
+    hotspots: list[PROverviewHotspot] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class StaticSignal(Model):
+    signalId: str
+    filePath: str
+    type: str
+    severity: Literal["info", "low", "medium", "high", "critical"] = "info"
+    message: str
+    lineStart: int | None = None
+    lineEnd: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class StaticChecksResult(Model):
+    signals: list[StaticSignal] = Field(default_factory=list)
+    toolFindings: list[StaticSignal] = Field(default_factory=list)
+
+
+class HotspotTask(Model):
+    taskId: str
+    filePath: str
+    category: str
+    priority: float
+    selectedHunks: list[int] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ContextEvidenceCandidate(Model):
+    refId: str
+    type: Literal["code", "rule", "doc", "history"]
+    title: str
+    snippet: str
+    filePath: str | None = None
+    lineStart: int | None = None
+    lineEnd: int | None = None
+    sourceId: str | None = None
+    url: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ContextPack(Model):
+    taskId: str
+    codeEvidenceCandidates: list[ContextEvidenceCandidate] = Field(default_factory=list)
+    ruleEvidenceCandidates: list[ContextEvidenceCandidate] = Field(default_factory=list)
+    docEvidenceCandidates: list[ContextEvidenceCandidate] = Field(default_factory=list)
+    historyEvidenceCandidates: list[ContextEvidenceCandidate] = Field(default_factory=list)
+
+
+class CandidateFinding(Model):
     filePath: str
     lineStart: int
     lineEnd: int
@@ -176,11 +249,24 @@ class CandidateSuggestion(Model):
     title: str
     body: str
     confidence: float
-    evidenceChunkIds: list[str]
+    evidenceRefs: list[str] = Field(default_factory=list)
 
 
-class CandidateSuggestionEnvelope(Model):
-    suggestions: list[CandidateSuggestion] = Field(default_factory=list)
+class CandidateFindingEnvelope(Model):
+    suggestions: list[CandidateFinding] = Field(default_factory=list)
+
+
+class Evidence(Model):
+    evidenceId: str
+    type: Literal["code", "rule", "doc", "history"]
+    title: str
+    snippet: str
+    filePath: str | None = None
+    lineStart: int | None = None
+    lineEnd: int | None = None
+    sourceId: str | None = None
+    url: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class Citation(Model):
@@ -198,14 +284,18 @@ class BackendSuggestion(Model):
     category: str
     title: str
     body: str
-    citations: list[Citation]
+    deliveryMode: Literal["inline", "summary"] = "inline"
+    evidence: list[Evidence] = Field(default_factory=list)
+    citations: list[Citation] = Field(default_factory=list)
     confidence: float
     fingerprint: str
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class RagResponse(Model):
     suggestions: list[BackendSuggestion]
     partialFailures: int
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class ValidationResult(Model):
@@ -219,19 +309,31 @@ class RankedSuggestion(Model):
     suggestion: BackendSuggestion
     rankScore: float
     retrievalScore: float
+    evidenceStrength: float = 0.0
+    plannerPriority: float = 0.0
+    staticSupport: float = 0.0
+    repoFeedbackScore: float = 0.0
 
 
 class HunkTask(Model):
+    taskId: str
     filePath: str
     language: str
     languageSlug: str
     patch: str
+    hunkIndex: int
     hunkHeader: str
     hunkPatch: str
     addedLines: list[str]
     changedNewLines: list[int]
     firstChangedLine: int
     priority: float
+    imports: list[str] = Field(default_factory=list)
+    changedSymbols: list[str] = Field(default_factory=list)
+    surroundingCode: list[RagCodeContextLine] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+    staticSignalIds: list[str] = Field(default_factory=list)
 
 
 class RetrievalQuery(Model):
@@ -252,6 +354,18 @@ class BuildNamespaceArtifacts(Model):
     sparsePath: str
     densePath: str
     denseMetaPath: str
+
+
+class ProgressUpdate(Model):
+    stage: Literal["overview", "static", "planning", "review", "synthesis", "ranking"]
+    message: str
+    filePath: str | None = None
+    stageDone: int | None = None
+    stageTotal: int | None = None
+    filesDone: int | None = None
+    filesTotal: int | None = None
+    level: Literal["info", "warn", "error"] = "info"
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 JSONDict = dict[str, Any]

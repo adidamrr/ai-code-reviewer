@@ -19,6 +19,7 @@ def rerank_suggestions(suggestions: list[dict[str, Any]], feedback_score_by_fing
     return sorted(
         suggestions,
         key=lambda item: (
+            -(1 if item.get("deliveryMode", "inline") == "inline" else 0),
             -(feedback_score_by_fingerprint.get(item["fingerprint"], 0)),
             -severity_weight(item["severity"]),
             item["createdAt"],

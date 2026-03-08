@@ -4,6 +4,17 @@ import re
 from typing import Any
 
 HUNK_REGEX = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@(.*)$")
+IMPORT_REGEXES = (
+    re.compile(r"^\+\s*import\s+['\"]([^'\"]+)['\"]"),
+    re.compile(r"^\+\s*import\s+.+?\s+from\s+['\"]([^'\"]+)['\"]"),
+    re.compile(r"^\+\s*from\s+([A-Za-z0-9_\.]+)\s+import\s+"),
+)
+SYMBOL_REGEXES = (
+    re.compile(r"^\+\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)"),
+    re.compile(r"^\+\s*(?:class|enum|typedef|extension)\s+([A-Za-z_][A-Za-z0-9_]*)"),
+    re.compile(r"^\+\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)"),
+    re.compile(r"^\+\s*(?:const|final|var|let)\s+([A-Za-z_][A-Za-z0-9_]*)\s*="),
+)
 
 EXTENSION_LANGUAGE_MAP = {
     "ts": "TypeScript",
@@ -111,6 +122,63 @@ def parse_unified_diff(patch: str) -> dict[str, list[dict[str, Any]]]:
             current_new += 1
 
     return {"hunks": hunks, "lineMap": line_map}
+
+
+def extract_imports_from_patch(patch: str) -> list[str]:
+    imports: list[str] = []
+    seen: set[str] = set()
+    for line in patch.split("\n"):
+        for pattern in IMPORT_REGEXES:
+            match = pattern.search(line)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            imports.append(value)
+    return imports[:20]
+
+
+def extract_changed_symbols_from_patch(patch: str) -> list[str]:
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for line in patch.split("\n"):
+        for pattern in SYMBOL_REGEXES:
+            match = pattern.search(line)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            symbols.append(value)
+    return symbols[:20]
+
+
+def extract_surrounding_code_from_patch(patch: str, *, limit: int = 12) -> list[dict[str, Any]]:
+    context: list[dict[str, Any]] = []
+    current_new = 1
+    for line in patch.split("\n"):
+        match = HUNK_REGEX.match(line)
+        if match:
+            current_new = int(match.group(3))
+            continue
+        if line.startswith("-") and not line.startswith("---"):
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            context.append({"lineNumber": current_new, "text": line[1:]})
+            current_new += 1
+            continue
+        if line.startswith(" "):
+            context.append({"lineNumber": current_new, "text": line[1:]})
+            current_new += 1
+            continue
+    if len(context) <= limit:
+        return context
+    head = context[: limit // 2]
+    tail = context[-(limit - len(head)) :]
+    return head + tail
 
 
 def detect_language(file_path: str) -> str:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from .schemas import CandidateSuggestion, HunkTask, ValidationResult
+from .schemas import CandidateFinding, HunkTask, ValidationResult
 
 SEVERITIES = {"info", "low", "medium", "high", "critical"}
 IDENTIFIER_REGEX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -38,7 +38,7 @@ def _identifiers_from_task(task: HunkTask) -> set[str]:
     return identifiers
 
 
-def _is_specific_enough(candidate: CandidateSuggestion, task: HunkTask) -> bool:
+def _is_specific_enough(candidate: CandidateFinding, task: HunkTask) -> bool:
     combined = f"{candidate.title} {candidate.body}".lower()
     if any(phrase in combined for phrase in GENERIC_PHRASES):
         return False
@@ -50,14 +50,14 @@ def _is_specific_enough(candidate: CandidateSuggestion, task: HunkTask) -> bool:
 
 
 class SuggestionValidator:
-    def validate(self, candidate: CandidateSuggestion, task: HunkTask, requested_scope: set[str]) -> ValidationResult:
+    def validate(self, candidate: CandidateFinding, task: HunkTask, requested_scope: set[str]) -> ValidationResult:
         if candidate.category not in requested_scope:
             return ValidationResult(valid=False, reason="category_not_requested")
         if candidate.severity not in SEVERITIES:
             return ValidationResult(valid=False, reason="invalid_severity")
         if not candidate.title.strip() or not candidate.body.strip():
             return ValidationResult(valid=False, reason="missing_text")
-        if not candidate.evidenceChunkIds:
+        if not candidate.evidenceRefs:
             return ValidationResult(valid=False, reason="missing_evidence")
         if not (0.0 <= candidate.confidence <= 1.0):
             return ValidationResult(valid=False, reason="invalid_confidence")

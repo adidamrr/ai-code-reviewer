@@ -85,23 +85,28 @@ def select_hunks(file: RagFile, max_hunks: int) -> list[HunkTask]:
         raw_hunks = [("", file.patch)]
 
     tasks: list[HunkTask] = []
-    for header, hunk_patch in raw_hunks:
+    for hunk_index, (header, hunk_patch) in enumerate(raw_hunks):
         added_lines, changed_new_lines = _extract_added_lines(hunk_patch)
         if not added_lines:
             continue
         first_changed_line = changed_new_lines[0] if changed_new_lines else 1
         tasks.append(
             HunkTask(
+                taskId=f"{file.path}:{hunk_index}",
                 filePath=file.path,
                 language=file.language,
                 languageSlug=language_slug,
                 patch=file.patch,
+                hunkIndex=hunk_index,
                 hunkHeader=header,
                 hunkPatch=hunk_patch,
                 addedLines=added_lines,
                 changedNewLines=changed_new_lines,
                 firstChangedLine=first_changed_line,
                 priority=_score_hunk(file.path, header, added_lines),
+                imports=file.imports,
+                changedSymbols=file.changedSymbols,
+                surroundingCode=file.surroundingCode,
             )
         )
 

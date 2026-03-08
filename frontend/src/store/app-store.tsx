@@ -62,6 +62,15 @@ export const JOB_STATUS_LABELS: Record<AnalysisJob["status"], string> = {
   canceled: "отменена",
 };
 
+export const JOB_STAGE_LABELS: Record<NonNullable<AnalysisJob["progress"]["stage"]>, string> = {
+  overview: "Обзор PR",
+  static: "Статический анализ",
+  planning: "Планирование hotspot",
+  review: "Анализ файлов",
+  synthesis: "Синтез результатов",
+  ranking: "Финальный ранжирующий проход",
+};
+
 export const SEVERITY_LABELS: Record<Suggestion["severity"], string> = {
   info: "info",
   low: "низкий",
@@ -105,6 +114,8 @@ interface RepoWorkspaceState {
   fileFilter: string;
 
   job: AnalysisJob | null;
+  jobBooting: boolean;
+  jobBootStartedAt: string | null;
   jobEvents: AnalysisJobEvent[];
   suggestions: Suggestion[];
   suggestionSearch: string;
@@ -510,9 +521,10 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       } while (cursor);
 
       upsertWorkflow(repoId, (workflow) => {
+        const inlineIds = items.filter((item) => (item.deliveryMode ?? "inline") === "inline").map((item) => item.id);
         const selectedSuggestionIds = workflow.selectedSuggestionIds.length > 0
-          ? workflow.selectedSuggestionIds.filter((id) => items.some((item) => item.id === id))
-          : items.map((item) => item.id);
+          ? workflow.selectedSuggestionIds.filter((id) => inlineIds.includes(id))
+          : inlineIds;
 
         return {
           ...workflow,
@@ -767,6 +779,8 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
                 selectedPrNumber: preset.prNumber,
                 activeStep: "params",
                 job: null,
+                jobBooting: false,
+                jobBootStartedAt: null,
                 jobEvents: [],
                 suggestions: [],
                 selectedSuggestionIds: [],
@@ -907,6 +921,8 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
             syncData: sync,
             activeStep: "params",
             job: null,
+            jobBooting: false,
+            jobBootStartedAt: null,
             jobEvents: [],
             suggestions: [],
             selectedSuggestionIds: [],
@@ -966,32 +982,99 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
           return;
         }
 
-        await runTask("Задача анализа создана", async () => {
-          const api = apiFactory();
-          const created = await api.createAnalysisJob(workflow.syncData!.prId, {
-            snapshotId: workflow.syncData!.snapshotId,
-            scope,
-            maxComments: workflow.maxComments,
-          });
+        const bootStartedAt = new Date().toISOString();
+        const pendingJobId = `pending-${crypto.randomUUID()}`;
 
-          const fresh = await api.getAnalysisJob(created.jobId);
+        upsertWorkflow(repoId, (current) => ({
+          ...current,
+          activeStep: "job",
+          jobBooting: true,
+          jobBootStartedAt: bootStartedAt,
+          job: {
+            id: pendingJobId,
+            prId: current.syncData!.prId,
+            snapshotId: current.syncData!.snapshotId,
+            status: "queued",
+            scope,
+            maxComments: current.maxComments,
+            progress: {
+              filesDone: 0,
+              total: current.syncData?.counts.files ?? 0,
+              stage: "overview",
+              stageProgress: { done: 0, total: 1 },
+            },
+            summary: {
+              totalSuggestions: 0,
+              partialFailures: 0,
+              filesSkipped: 0,
+              warnings: [],
+            },
+            errorMessage: null,
+            createdAt: bootStartedAt,
+            updatedAt: bootStartedAt,
+          },
+          jobEvents: [
+            {
+              id: `local-${crypto.randomUUID()}`,
+              jobId: pendingJobId,
+              level: "info",
+              message: "Запрос на создание job отправлен. Для больших PR backend может отвечать несколько минут.",
+              filePath: null,
+              stage: "overview",
+              meta: {
+                files: current.syncData?.counts.files ?? 0,
+                scope,
+              },
+              createdAt: bootStartedAt,
+            },
+          ],
+        }));
+
+        try {
+          await runTask("Задача анализа создана", async () => {
+            const api = apiFactory();
+            const created = await api.createAnalysisJob(workflow.syncData!.prId, {
+              snapshotId: workflow.syncData!.snapshotId,
+              scope,
+              maxComments: workflow.maxComments,
+            });
+
+            const fresh = await api.getAnalysisJob(created.jobId);
+            upsertWorkflow(repoId, (current) => ({
+              ...current,
+              job: fresh,
+              jobBooting: false,
+              jobBootStartedAt: null,
+              activeStep: "job",
+            }));
+
+            await loadJobEventsInternal(repoId, fresh.id);
+
+            if (fresh.status === "done") {
+              await loadSuggestionsInternal(repoId, fresh.id);
+            }
+          });
+        } catch (error) {
+          const message = formatUiError(error, stateRef.current.backendUrl);
           upsertWorkflow(repoId, (current) => ({
             ...current,
-            job: fresh,
-            activeStep: "job",
+            jobBooting: false,
+            jobBootStartedAt: null,
+            job: current.job
+              ? {
+                  ...current.job,
+                  status: "failed",
+                  errorMessage: message,
+                  updatedAt: new Date().toISOString(),
+                }
+              : null,
           }));
-
-          await loadJobEventsInternal(repoId, fresh.id);
-
-          if (fresh.status === "done") {
-            await loadSuggestionsInternal(repoId, fresh.id);
-          }
-        });
+        }
       },
 
       refreshJob: async (repoId) => {
         const workflow = stateRef.current.workflows[repoId];
-        if (!workflow?.job) {
+        if (!workflow?.job || workflow.job.id.startsWith("pending-")) {
           return;
         }
 
@@ -999,7 +1082,12 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
           const api = apiFactory();
           const fresh = await api.getAnalysisJob(workflow.job!.id);
 
-          upsertWorkflow(repoId, (current) => ({ ...current, job: fresh }));
+          upsertWorkflow(repoId, (current) => ({
+            ...current,
+            job: fresh,
+            jobBooting: false,
+            jobBootStartedAt: null,
+          }));
           await loadJobEventsInternal(repoId, fresh.id);
 
           if (fresh.status === "done") {
@@ -1010,21 +1098,26 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
 
       cancelJob: async (repoId) => {
         const workflow = stateRef.current.workflows[repoId];
-        if (!workflow?.job) {
+        if (!workflow?.job || workflow.job.id.startsWith("pending-")) {
           return;
         }
 
         await runTask("Задача анализа отменена", async () => {
           const api = apiFactory();
           const canceled = await api.cancelAnalysisJob(workflow.job!.id);
-          upsertWorkflow(repoId, (current) => ({ ...current, job: canceled }));
+          upsertWorkflow(repoId, (current) => ({
+            ...current,
+            job: canceled,
+            jobBooting: false,
+            jobBootStartedAt: null,
+          }));
           await loadJobEventsInternal(repoId, canceled.id);
         });
       },
 
       loadJobEvents: async (repoId) => {
         const workflow = stateRef.current.workflows[repoId];
-        if (!workflow?.job) {
+        if (!workflow?.job || workflow.job.id.startsWith("pending-")) {
           return;
         }
 
@@ -1335,6 +1428,8 @@ function createDefaultWorkflow(repoId: string, persisted?: PersistedWorkspacePre
     minSeverity: "none",
     fileFilter: "",
     job: null,
+    jobBooting: false,
+    jobBootStartedAt: null,
     jobEvents: [],
     suggestions: [],
     suggestionSearch: "",
@@ -1359,6 +1454,10 @@ function createDefaultWorkflow(repoId: string, persisted?: PersistedWorkspacePre
 function deriveRepoStatus(workflow: RepoWorkspaceState | undefined): { label: string; tone: "ok" | "warn" | "muted" } {
   if (!workflow) {
     return { label: "нет PR", tone: "muted" };
+  }
+
+  if (workflow.jobBooting) {
+    return { label: "анализ стартует", tone: "warn" };
   }
 
   if (workflow.job && (workflow.job.status === "queued" || workflow.job.status === "running")) {
@@ -1394,11 +1493,14 @@ function canOpenStepWithWorkflow(workflow: RepoWorkspaceState | undefined, step:
   }
 
   if (step === "results") {
-    return Boolean(workflow.job);
+    return Boolean(workflow.job && !workflow.jobBooting);
   }
 
   if (step === "publish") {
-    return Boolean(workflow.job?.status === "done" && workflow.suggestions.length > 0);
+    return Boolean(
+      workflow.job?.status === "done"
+      && workflow.suggestions.some((item) => (item.deliveryMode ?? "inline") === "inline"),
+    );
   }
 
   if (step === "feedback") {
@@ -1507,6 +1609,7 @@ function createMockEvents(job: AnalysisJob | null | undefined): AnalysisJobEvent
       message: "Подключен mock stream событий (реальный endpoint недоступен).",
       filePath: null,
       meta: null,
+      stage: "overview",
       createdAt: now,
     },
     {
@@ -1515,6 +1618,7 @@ function createMockEvents(job: AnalysisJob | null | undefined): AnalysisJobEvent
       level: job.status === "failed" ? "error" : "info",
       message: `Текущий статус: ${JOB_STATUS_LABELS[job.status]}`,
       filePath: null,
+      stage: job.progress.stage ?? "review",
       meta: {
         progress: `${job.progress.filesDone}/${job.progress.total}`,
       },
