@@ -47,6 +47,7 @@ class RagConfig:
     embed_batch_size: int
     generation_max_tokens: int
     ollama_timeout_seconds: float
+    repair_model: str | None = None
 
 
 _CONFIG: RagConfig | None = None
@@ -57,13 +58,14 @@ def load_config() -> RagConfig:
     if _CONFIG is not None:
         return _CONFIG
 
+    generation_model = os.getenv("RAG_GENERATION_MODEL", "qwen2.5-coder:7b")
     _CONFIG = RagConfig(
         repo_root=REPO_ROOT,
         rag_root=RAG_ROOT,
         kb_root=Path(os.getenv("RAG_KB_DIR", str(KB_ROOT))).resolve(),
         build_root=Path(os.getenv("RAG_BUILD_DIR", str(BUILD_ROOT))).resolve(),
         ollama_base_url=(os.getenv("RAG_OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/"),
-        generation_model=os.getenv("RAG_GENERATION_MODEL", "qwen2.5-coder:7b"),
+        generation_model=generation_model,
         eval_generation_model=os.getenv("RAG_EVAL_GENERATION_MODEL", "qwen2.5-coder:14b"),
         embed_model=os.getenv("RAG_EMBED_MODEL", "nomic-embed-text"),
         supported_languages=parse_list(os.getenv("RAG_SUPPORTED_LANGUAGES"), default=SUPPORTED_LANGUAGES),
@@ -77,5 +79,6 @@ def load_config() -> RagConfig:
         embed_batch_size=max(1, int(os.getenv("RAG_EMBED_BATCH_SIZE", "64"))),
         generation_max_tokens=max(64, int(os.getenv("RAG_GENERATION_MAX_TOKENS", "160"))),
         ollama_timeout_seconds=float(os.getenv("RAG_OLLAMA_TIMEOUT_SECONDS", "120")),
+        repair_model=(os.getenv("RAG_REPAIR_MODEL") or generation_model).strip() or generation_model,
     )
     return _CONFIG

@@ -49,6 +49,9 @@ class _FakeClient:
             "notes": ["Touches async flow"],
         }
 
+    async def chat_text(self, messages, **kwargs):
+        return "NO_FINDINGS"
+
 
 class _FakeRetriever:
     def search(self, namespaces, query_text, query_vector, **kwargs):
@@ -254,6 +257,7 @@ class RagPipelineV2Tests(unittest.IsolatedAsyncioTestCase):
             embed_batch_size=64,
             generation_max_tokens=256,
             ollama_timeout_seconds=30.0,
+            repair_model="gemma3:12b",
         )
         request = {
             "jobId": "job_1",

@@ -13,6 +13,12 @@ class OllamaError(RuntimeError):
     pass
 
 
+class OllamaStructuredOutputError(OllamaError):
+    def __init__(self, message: str, raw_content: str) -> None:
+        super().__init__(message)
+        self.raw_content = raw_content
+
+
 class OllamaClient:
     def __init__(self, config: RagConfig) -> None:
         self.base_url = config.ollama_base_url
@@ -21,6 +27,7 @@ class OllamaClient:
         self.embed_model = config.embed_model
         self.embed_batch_size = config.embed_batch_size
         self.generation_max_tokens = config.generation_max_tokens
+        self.repair_model = config.repair_model or config.generation_model
         self._model_cache: set[str] | None = None
 
     async def list_models(self) -> list[str]:
@@ -96,4 +103,37 @@ class OllamaClient:
         try:
             return json.loads(content)
         except json.JSONDecodeError as error:
-            raise OllamaError(f"Ollama returned invalid JSON: {error}") from error
+            raise OllamaStructuredOutputError(
+                f"Ollama returned invalid JSON: {error}",
+                content,
+            ) from error
+
+    async def chat_text(
+        self,
+        messages: list[OllamaMessage],
+        *,
+        model: str | None = None,
+        temperature: float = 0.1,
+        num_ctx: int = 4096,
+        num_predict: int | None = None,
+    ) -> str:
+        payload = {
+            "model": model or self.generation_model,
+            "messages": [message.model_dump() for message in messages],
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_ctx": num_ctx,
+                "num_predict": num_predict or self.generation_max_tokens,
+            },
+        }
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(f"{self.base_url}/api/chat", json=payload)
+        if response.status_code >= 400:
+            raise OllamaError(f"Ollama chat request failed: {response.status_code} {response.text}")
+        data = response.json()
+        message = data.get("message") or {}
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise OllamaError("Ollama chat response does not contain text content")
+        return content

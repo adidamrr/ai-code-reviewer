@@ -289,6 +289,7 @@ async def runtime_status() -> dict[str, Any]:
         "buildRoot": str(config.build_root),
         "embeddingModel": config.embed_model,
         "generationModel": config.generation_model,
+        "repairModel": config.repair_model,
         "requiredNamespaces": required_namespaces,
         "builtNamespaces": [],
         "missingArtifacts": [],
@@ -321,7 +322,10 @@ async def runtime_status() -> dict[str, Any]:
 
     client = OllamaClient(config)
     try:
-        await client.ensure_models_available([config.embed_model, config.generation_model])
+        required_models = [config.embed_model, config.generation_model]
+        if config.repair_model and config.repair_model not in required_models:
+            required_models.append(config.repair_model)
+        await client.ensure_models_available(required_models)
     except OllamaError as error:
         status["message"] = str(error)
         return status
@@ -346,7 +350,10 @@ async def analyze_request(
     config = load_config()
     request = RagRequest.model_validate(raw_request)
     runtime = _load_runtime(config)
-    await runtime.client.ensure_models_available([config.embed_model, config.generation_model])
+    required_models = [config.embed_model, config.generation_model]
+    if config.repair_model and config.repair_model not in required_models:
+        required_models.append(config.repair_model)
+    await runtime.client.ensure_models_available(required_models)
     requested_scope = _effective_scope(config, request)
     if not requested_scope:
         return RagResponse(suggestions=[], partialFailures=0, meta={}).model_dump()

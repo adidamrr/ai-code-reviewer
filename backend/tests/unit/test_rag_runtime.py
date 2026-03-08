@@ -23,6 +23,9 @@ from rag_ml.pr_overview import build_pr_overview
 from rag_ml.query_builder import build_query
 from rag_ml.rule_fallbacks import style_fallback_candidates
 from rag_ml.schemas import CandidateFinding, DocumentDescriptor, HunkTask, KnowledgeChunk, NormalizedDocument, PROverview, RagRequest, RagFile, RetrievalHit, SectionSpan
+from rag_ml.schemas import StaticSignal
+from rag_ml.generator import SuggestionGenerator
+from rag_ml.ollama_client import OllamaStructuredOutputError
 from rag_ml.static_signals import collect_static_signals
 from rag_ml.validator import SuggestionValidator
 from rag_ml.verifier import FindingVerifier
@@ -37,6 +40,64 @@ class _OverviewClient:
             "hotspots": [{"filePath": "lib/example.dart", "reasons": ["async flow changed"], "risk": 0.8}],
             "notes": ["Touches async flow"],
         }
+
+
+class _GeneratorClient:
+    repair_model = "gemma3:12b"
+
+    async def chat_structured(self, messages, schema, **kwargs):
+        content = messages[0].content
+        if "syntax repair assistant" in content:
+            return {
+                "findings": [
+                    {
+                        "filePath": "src/example.py",
+                        "lineStart": 10,
+                        "lineEnd": 10,
+                        "severity": "warning",
+                        "category": "bug",
+                        "shortLabel": "broad exception hides failures",
+                        "confidence": 0.8,
+                        "evidenceRefs": ["rule:src/example.py:10:broad-except"],
+                    }
+                ]
+            }
+        raise AssertionError("unexpected structured call in test")
+
+    async def chat_text(self, messages, **kwargs):
+        return "FINDING|bug|warning|10|10|broad exception hides failures|rule:src/example.py:10:broad-except"
+
+
+class _RepairingGeneratorClient:
+    repair_model = "gemma3:12b"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat_structured(self, messages, schema, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise OllamaStructuredOutputError(
+                "Ollama returned invalid JSON: missing comma",
+                '{"findings": [{"category": "bug" "severity": "warning"}]}',
+            )
+        return {
+            "findings": [
+                {
+                    "filePath": "src/example.py",
+                    "lineStart": 10,
+                    "lineEnd": 10,
+                    "severity": "warning",
+                    "category": "bug",
+                    "shortLabel": "broad exception hides failures",
+                    "confidence": 0.8,
+                    "evidenceRefs": ["rule:src/example.py:10:broad-except"],
+                }
+            ]
+        }
+
+    async def chat_text(self, messages, **kwargs):
+        return "NO_FINDINGS"
 
 
 class RagRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -364,6 +425,100 @@ class RagRuntimeTests(unittest.IsolatedAsyncioTestCase):
         overview = await build_pr_overview(_OverviewClient(), request)
         self.assertEqual(overview.riskLevel, "medium")
         self.assertEqual(overview.hotspots[0].filePath, "lib/example.dart")
+
+    async def test_generator_line_fallback_normalizes_aliases(self) -> None:
+        task = HunkTask(
+            taskId="src/example.py:0",
+            filePath="src/example.py",
+            language="Python",
+            languageSlug="python",
+            patch="@@ -10 +10 @@\n+except Exception:",
+            hunkIndex=0,
+            hunkHeader="@@ -10 +10 @@",
+            hunkPatch="@@ -10 +10 @@\n+except Exception:",
+            addedLines=["except Exception:"],
+            changedNewLines=[10],
+            firstChangedLine=10,
+            priority=1.0,
+        )
+        context = build_context_pack(
+            task,
+            [
+                StaticSignal(
+                    signalId="broad-except",
+                    filePath="src/example.py",
+                    type="broad-except",
+                    severity="medium",
+                    message="Avoid broad exception handling where possible.",
+                    lineStart=10,
+                    lineEnd=10,
+                )
+            ],
+            [
+                RetrievalHit(
+                    chunkId="python:docs:000001",
+                    namespace="python",
+                    sourceId="python-docs",
+                    title="Python docs",
+                    url="https://docs.python.org/3/tutorial/errors.html",
+                    headingPath=["Errors and Exceptions"],
+                    text="Avoid overly broad exception handling where possible.",
+                    finalScore=0.7,
+                    sparseRank=1,
+                    denseRank=1,
+                )
+            ],
+        )
+        context.ruleEvidenceCandidates = [
+            context.ruleEvidenceCandidates[0].model_copy(update={"refId": "rule:src/example.py:10:broad-except"})
+        ]
+
+        generator = SuggestionGenerator(_GeneratorClient())
+        envelope = await generator._detect_with_line_format(task, ["bugs"], context, max_findings=2)
+        self.assertIsNotNone(envelope)
+        self.assertEqual(len(envelope.findings), 1)
+        self.assertEqual(envelope.findings[0].category, "bugs")
+        self.assertEqual(envelope.findings[0].severity, "medium")
+
+    async def test_generator_repair_stage_recovers_invalid_json(self) -> None:
+        task = HunkTask(
+            taskId="src/example.py:0",
+            filePath="src/example.py",
+            language="Python",
+            languageSlug="python",
+            patch="@@ -10 +10 @@\n+except Exception:",
+            hunkIndex=0,
+            hunkHeader="@@ -10 +10 @@",
+            hunkPatch="@@ -10 +10 @@\n+except Exception:",
+            addedLines=["except Exception:"],
+            changedNewLines=[10],
+            firstChangedLine=10,
+            priority=1.0,
+        )
+        context = build_context_pack(
+            task,
+            [
+                StaticSignal(
+                    signalId="broad-except",
+                    filePath="src/example.py",
+                    type="broad-except",
+                    severity="medium",
+                    message="Avoid broad exception handling where possible.",
+                    lineStart=10,
+                    lineEnd=10,
+                )
+            ],
+            [],
+        )
+        context.ruleEvidenceCandidates = [
+            context.ruleEvidenceCandidates[0].model_copy(update={"refId": "rule:src/example.py:10:broad-except"})
+        ]
+
+        generator = SuggestionGenerator(_RepairingGeneratorClient())
+        envelope = await generator.detect(task, ["bugs"], context, max_findings=2)
+        self.assertEqual(len(envelope.findings), 1)
+        self.assertEqual(envelope.findings[0].category, "bugs")
+        self.assertEqual(envelope.findings[0].severity, "medium")
 
 
 if __name__ == "__main__":
