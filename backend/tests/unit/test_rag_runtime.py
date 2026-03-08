@@ -12,7 +12,9 @@ if str(RAG_SRC) not in sys.path:
 
 from rag_ml.citation_resolver import CitationResolver
 from rag_ml.context_builder import build_context_pack
+from rag_ml.bug_rules import rule_based_bug_candidates
 from rag_ml.evidence_models import doc_ref
+from rag_ml.file_classifier import classify_file
 from rag_ml.hotspot_planner import plan_hotspot_tasks
 from rag_ml.kb_chunker import chunk_documents
 from rag_ml.kb_normalizer import normalize_descriptor
@@ -23,6 +25,7 @@ from rag_ml.rule_fallbacks import style_fallback_candidates
 from rag_ml.schemas import CandidateFinding, DocumentDescriptor, HunkTask, KnowledgeChunk, NormalizedDocument, PROverview, RagRequest, RagFile, RetrievalHit, SectionSpan
 from rag_ml.static_signals import collect_static_signals
 from rag_ml.validator import SuggestionValidator
+from rag_ml.verifier import FindingVerifier
 
 
 class _OverviewClient:
@@ -226,6 +229,62 @@ class RagRuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = SuggestionValidator().validate(candidate, task, {"style"})
         self.assertFalse(result.valid)
         self.assertEqual(result.reason, "generic_feedback")
+
+    def test_file_classifier_marks_localization_as_resource(self) -> None:
+        file = RagFile(
+            path="lib/presentation/localization/control_strings_en.dart",
+            language="Dart",
+            patch="@@ -1 +1 @@\n+final label = 'ok';",
+        )
+        self.assertEqual(classify_file(file), "resource")
+
+    def test_bug_rules_detect_mutable_default_argument(self) -> None:
+        task = HunkTask(
+            taskId="src/example.py:0",
+            filePath="src/example.py",
+            language="Python",
+            languageSlug="python",
+            patch="@@ -1 +1 @@\n+def build_items(items=[]):",
+            hunkIndex=0,
+            hunkHeader="@@ -1 +1 @@",
+            hunkPatch="@@ -1 +1 @@\n+def build_items(items=[]):",
+            addedLines=["def build_items(items=[]):"],
+            changedNewLines=[1],
+            firstChangedLine=1,
+            priority=1.0,
+        )
+        candidates = rule_based_bug_candidates(task, [])
+        self.assertTrue(any(candidate.title == "Avoid mutable default arguments" for candidate in candidates))
+
+    def test_verifier_rejects_valid_private_dart_type_name(self) -> None:
+        candidate = CandidateFinding(
+            filePath="lib/example.dart",
+            lineStart=1,
+            lineEnd=1,
+            severity="low",
+            category="style",
+            title="Use UpperCamelCase for type names",
+            body="`_LogoWidget` should use UpperCamelCase.",
+            confidence=0.82,
+            evidenceRefs=["code:lib/example.dart:0:0"],
+        )
+        task = HunkTask(
+            taskId="lib/example.dart:0",
+            filePath="lib/example.dart",
+            language="Dart",
+            languageSlug="dart",
+            patch="@@ -1 +1 @@\n+class _LogoWidget extends StatelessWidget {",
+            hunkIndex=0,
+            hunkHeader="@@ -1 +1 @@",
+            hunkPatch="@@ -1 +1 @@\n+class _LogoWidget extends StatelessWidget {",
+            addedLines=["class _LogoWidget extends StatelessWidget {"],
+            changedNewLines=[1],
+            firstChangedLine=1,
+            priority=1.0,
+        )
+        result = FindingVerifier().verify(candidate, task, {"style"}, build_context_pack(task, [], []))
+        self.assertFalse(result.valid)
+        self.assertEqual(result.reason, "style_already_valid")
 
     def test_style_fallback_candidates_generate_grounded_dart_naming_comment(self) -> None:
         task = HunkTask(

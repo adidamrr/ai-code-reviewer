@@ -9,6 +9,9 @@ AUTH_TOKENS = {"auth", "token", "login", "session", "refresh", "password", "secr
 PERF_TOKENS = {"for (", "while (", ".map(", ".where(", ".forEach(", "sort(", "fold("}
 NULL_TOKENS = {"!", "??", "null", "late "}
 NETWORK_TOKENS = {"http", "dio", "request", "response", "fetch", "query", "db"}
+PY_MUTABLE_DEFAULT_TOKENS = {"=[]", "={}", "=set("}
+PY_BROAD_EXCEPT_TOKENS = {"except exception:"}
+SQL_TOKENS = {"select ", "insert ", "update ", "delete "}
 
 
 def _added_lines(file: RagFile) -> list[tuple[int, str]]:
@@ -103,6 +106,48 @@ def collect_static_signals(files: list[RagFile]) -> StaticChecksResult:
                     type="large-change",
                     severity="info",
                     message="Файл содержит крупный diff и повышенный риск шумовых регрессий.",
+                )
+            )
+
+        py_mutable_lines = [line_no for line_no, text in added if _contains_any(text.replace(" ", ""), PY_MUTABLE_DEFAULT_TOKENS)]
+        if py_mutable_lines:
+            signals.append(
+                StaticSignal(
+                    signalId=f"{file.path}:mutable-default",
+                    filePath=file.path,
+                    type="mutable-default",
+                    severity="medium",
+                    message="В patch есть mutable default argument.",
+                    lineStart=min(py_mutable_lines),
+                    lineEnd=max(py_mutable_lines),
+                )
+            )
+
+        broad_except_lines = [line_no for line_no, text in added if _contains_any(text, PY_BROAD_EXCEPT_TOKENS)]
+        if broad_except_lines:
+            signals.append(
+                StaticSignal(
+                    signalId=f"{file.path}:broad-except",
+                    filePath=file.path,
+                    type="broad-except",
+                    severity="medium",
+                    message="В patch есть broad exception handling.",
+                    lineStart=min(broad_except_lines),
+                    lineEnd=max(broad_except_lines),
+                )
+            )
+
+        sql_lines = [line_no for line_no, text in added if _contains_any(text, SQL_TOKENS)]
+        if sql_lines:
+            signals.append(
+                StaticSignal(
+                    signalId=f"{file.path}:sql-change",
+                    filePath=file.path,
+                    type="sql-change",
+                    severity="high",
+                    message="В patch есть изменения SQL или query string assembly.",
+                    lineStart=min(sql_lines),
+                    lineEnd=max(sql_lines),
                 )
             )
 

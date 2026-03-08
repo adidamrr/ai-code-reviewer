@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import json
 
-from .schemas import ContextPack, HunkTask, OllamaMessage
+from .schemas import ContextPack, FindingOutline, OllamaMessage, HunkTask
 
+DETECTOR_SYSTEM_PROMPT = (
+    "You are a grounded code review detector. "
+    "Your job is to return compact structured findings only. "
+    "Do not explain at length. Do not summarize documentation. "
+    "Use only provided evidence reference ids. "
+    "If there is no grounded issue, return an empty findings array."
+)
 
-SYSTEM_PROMPT = (
-    "You are a grounded code review assistant. "
-    "You are working inside a staged code review pipeline. "
-    "Use only the provided evidence references. "
-    "Return JSON only. "
-    "If you cannot justify a finding with evidenceRefs, return an empty suggestions array. "
-    "Comments must be about the changed code, not documentation summaries. "
-    "Prefer fewer, specific findings over broad commentary."
+EXPLAINER_SYSTEM_PROMPT = (
+    "You are a concise code review explainer. "
+    "You receive one accepted finding and must produce a short human-readable title and body. "
+    "Do not invent evidence or claims beyond the provided finding and context."
 )
 
 
@@ -27,35 +30,34 @@ def _serialize_context(context_pack: ContextPack) -> dict:
     return {
         "code": [candidate.model_dump() for candidate in context_pack.codeEvidenceCandidates[:8]],
         "rules": [candidate.model_dump() for candidate in context_pack.ruleEvidenceCandidates[:8]],
-        "docs": [candidate.model_dump() for candidate in context_pack.docEvidenceCandidates[:6]],
+        "docs": [candidate.model_dump() for candidate in context_pack.docEvidenceCandidates[:4]],
         "history": [candidate.model_dump() for candidate in context_pack.historyEvidenceCandidates[:4]],
     }
 
 
-def build_messages(
+def build_detection_messages(
     task: HunkTask,
     categories: list[str],
     context_pack: ContextPack,
     *,
-    max_suggestions: int = 2,
+    max_findings: int = 2,
 ) -> list[OllamaMessage]:
     user_prompt = {
         "instructions": {
             "allowedCategories": categories,
-            "maxSuggestions": max_suggestions,
+            "maxFindings": max_findings,
             "rules": [
                 "Return valid JSON matching the provided schema.",
-                "Each suggestion.evidenceRefs item must match one of the provided evidence refIds.",
-                "If there is no grounded finding, return {'suggestions': []}.",
-                "Only comment on changed code or directly affected behavior.",
-                "Use code or rule evidence when documentation evidence is not necessary.",
-                "Avoid generic suggestions and documentation summaries.",
-                "Do not invent sources, URLs, snippets, or evidence ids.",
+                "Use only evidenceRefs from the provided evidence candidates.",
+                "Prefer specific local issues over general comments.",
+                "Do not emit documentation summaries.",
+                "If uncertain, return {'findings': []}.",
             ],
         },
         "task": {
             "taskId": task.taskId,
             "filePath": task.filePath,
+            "fileClass": task.fileClass,
             "language": task.languageSlug,
             "categories": categories,
             "reasons": task.reasons,
@@ -64,12 +66,40 @@ def build_messages(
             "changedSymbols": task.changedSymbols[:10],
             "imports": task.imports[:10],
             "hunkHeader": task.hunkHeader,
-            "hunkPatch": _truncate_text(task.hunkPatch, 1800),
-            "addedLines": task.addedLines[:20],
+            "hunkPatch": _truncate_text(task.hunkPatch, 1400),
+            "addedLines": task.addedLines[:18],
         },
         "context": _serialize_context(context_pack),
     }
     return [
-        OllamaMessage(role="system", content=SYSTEM_PROMPT),
+        OllamaMessage(role="system", content=DETECTOR_SYSTEM_PROMPT),
+        OllamaMessage(role="user", content=json.dumps(user_prompt, ensure_ascii=True)),
+    ]
+
+
+def build_explainer_messages(
+    task: HunkTask,
+    outline: FindingOutline,
+    context_pack: ContextPack,
+) -> list[OllamaMessage]:
+    user_prompt = {
+        "rules": [
+            "Return valid JSON matching the provided schema.",
+            "Keep the title short and actionable.",
+            "Keep the body to one short paragraph.",
+            "Do not mention documentation unless it is required by the finding.",
+            "Do not invent new evidence or change the category.",
+        ],
+        "task": {
+            "taskId": task.taskId,
+            "filePath": task.filePath,
+            "language": task.languageSlug,
+            "hunkPatch": _truncate_text(task.hunkPatch, 1200),
+        },
+        "finding": outline.model_dump(),
+        "context": _serialize_context(context_pack),
+    }
+    return [
+        OllamaMessage(role="system", content=EXPLAINER_SYSTEM_PROMPT),
         OllamaMessage(role="user", content=json.dumps(user_prompt, ensure_ascii=True)),
     ]

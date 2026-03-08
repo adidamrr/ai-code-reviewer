@@ -20,7 +20,22 @@ THRESHOLDS = {
 }
 CATEGORY_KEYWORDS = {
     "style": {"camelcase", "lowercamelcase", "uppercamelcase", "identifier", "naming", "convention"},
-    "bugs": {"null", "exception", "async", "state", "logic", "edge case", "handle"},
+    "bugs": {
+        "null",
+        "exception",
+        "async",
+        "state",
+        "logic",
+        "edge case",
+        "handle",
+        "mutable",
+        "default",
+        "await",
+        "pagination",
+        "guard",
+        "broad",
+        "query",
+    },
     "performance": {"performance", "loop", "blocking", "allocation", "copy", "complexity", "repeated"},
     "security": {"security", "validate", "sanitize", "injection", "auth", "secret", "unsafe"},
 }
@@ -44,6 +59,14 @@ def _is_specific_enough(candidate: CandidateFinding, task: HunkTask) -> bool:
         return False
     identifiers = _identifiers_from_task(task)
     if any(identifier in combined for identifier in identifiers):
+        return True
+    added_lines = " ".join(task.addedLines).lower()
+    candidate_terms = {
+        token
+        for token in IDENTIFIER_REGEX.findall(combined)
+        if len(token) >= 4 and token not in {"this", "that", "with", "from", "code", "review", "should"}
+    }
+    if sum(1 for token in candidate_terms if token in added_lines) >= 2:
         return True
     keywords = CATEGORY_KEYWORDS.get(candidate.category, set())
     return any(keyword in combined for keyword in keywords)

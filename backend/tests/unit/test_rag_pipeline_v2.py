@@ -16,8 +16,8 @@ from rag_ml.hotspot_planner import plan_hotspot_tasks
 from rag_ml.schemas import (
     BackendSuggestion,
     CandidateFinding,
-    CandidateFindingEnvelope,
     Evidence,
+    FindingOutlineEnvelope,
     PROverview,
     PROverviewHotspot,
     RagRequest,
@@ -30,6 +30,7 @@ from rag_ml.service import analyze_request
 from rag_ml.static_signals import collect_static_signals
 from rag_ml.synthesizer import synthesize_suggestions
 from rag_ml.validator import SuggestionValidator
+from rag_ml.verifier import FindingVerifier
 
 
 class _FakeClient:
@@ -68,8 +69,11 @@ class _FakeRetriever:
 
 
 class _FakeGenerator:
-    async def generate(self, task, categories, context_pack, **kwargs):
-        return CandidateFindingEnvelope(suggestions=[])
+    async def detect(self, task, categories, context_pack, **kwargs):
+        return FindingOutlineEnvelope(findings=[])
+
+    async def explain(self, task, outline, context_pack):
+        raise AssertionError("explain should not be called in this test")
 
 
 class _FakeCitationResolver:
@@ -102,6 +106,7 @@ class _FakeRuntime:
         self.generator = _FakeGenerator()
         self.citation_resolver = _FakeCitationResolver()
         self.validator = _FakeValidator()
+        self.verifier = FindingVerifier()
 
     def has_namespace(self, namespace: str) -> bool:
         return namespace == "dart"

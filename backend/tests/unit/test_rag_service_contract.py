@@ -17,14 +17,17 @@ from rag_ml.schemas import (
     BuildManifest,
     BuildNamespaceMeta,
     CandidateFinding,
-    CandidateFindingEnvelope,
     ContextPack,
     ContextEvidenceCandidate,
     Evidence,
+    FindingExplanation,
+    FindingOutline,
+    FindingOutlineEnvelope,
     RetrievalHit,
     ValidationResult,
 )
 from rag_ml.service import analyze_request, runtime_status
+from rag_ml.verifier import FindingVerifier
 
 
 class _FakeClient:
@@ -43,7 +46,25 @@ class _FakeClient:
                 "hotspots": [{"filePath": "lib/example.dart", "reasons": ["heuristic-risk"], "risk": 0.8}],
                 "notes": ["Touches auth flow"],
             }
-        return {"suggestions": []}
+        if "FindingOutlineEnvelope" in str(schema) or "\"findings\"" in str(schema):
+            return {
+                "findings": [
+                    {
+                        "filePath": "lib/example.dart",
+                        "lineStart": 1,
+                        "lineEnd": 1,
+                        "severity": "low",
+                        "category": "style",
+                        "shortLabel": "use lowerCamelCase for constants",
+                        "confidence": 0.82,
+                        "evidenceRefs": [
+                            "doc:dart:effective-dart:000001",
+                            "code:lib/example.dart:0:0",
+                        ],
+                    }
+                ]
+            }
+        return {"title": "Use lowerCamelCase for identifiers", "body": "This identifier naming does not follow Dart style guidance."}
 
 
 class _FakeRetriever:
@@ -77,22 +98,34 @@ class _FakeRetriever:
 
 
 class _FakeGenerator:
-    async def generate(self, task, categories, context_pack, **kwargs):
+    async def detect(self, task, categories, context_pack, **kwargs):
         category = categories[0]
-        return CandidateFindingEnvelope(
-            suggestions=[
-                CandidateFinding(
+        return FindingOutlineEnvelope(
+            findings=[
+                FindingOutline(
                     filePath=task.filePath,
                     lineStart=task.firstChangedLine,
                     lineEnd=task.firstChangedLine,
                     severity="low",
                     category=category,
-                    title="Use lowerCamelCase for constants",
-                    body="This identifier naming does not follow Dart style guidance.",
+                    shortLabel="use lowerCamelCase for constants",
                     confidence=0.82,
                     evidenceRefs=[doc_ref("dart:effective-dart:000001"), context_pack.codeEvidenceCandidates[0].refId],
                 )
             ]
+        )
+
+    async def explain(self, task, outline, context_pack):
+        return CandidateFinding(
+            filePath=outline.filePath,
+            lineStart=outline.lineStart,
+            lineEnd=outline.lineEnd,
+            severity=outline.severity,
+            category=outline.category,
+            title="Use lowerCamelCase for constants",
+            body="This identifier naming does not follow Dart style guidance.",
+            confidence=outline.confidence,
+            evidenceRefs=outline.evidenceRefs,
         )
 
 
@@ -141,6 +174,7 @@ class _FakeRuntime:
         self.generator = _FakeGenerator()
         self.citation_resolver = _FakeCitationResolver()
         self.validator = _FakeValidator()
+        self.verifier = FindingVerifier()
 
     def has_namespace(self, namespace: str) -> bool:
         return namespace == "dart"
@@ -192,11 +226,11 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
             result = await analyze_request(request)
 
         self.assertEqual(result["partialFailures"], 0)
-        self.assertEqual(len(result["suggestions"]), 1)
+        self.assertGreaterEqual(len(result["suggestions"]), 1)
         suggestion = result["suggestions"][0]
         self.assertEqual(suggestion["filePath"], "lib/example.dart")
         self.assertEqual(suggestion["category"], "style")
-        self.assertEqual(suggestion["citations"][0]["sourceId"], "effective-dart")
+        self.assertTrue(any(item["sourceId"] == "effective-dart" for item in suggestion["citations"]))
         self.assertGreaterEqual(len(suggestion["evidence"]), 1)
         self.assertTrue(suggestion["fingerprint"])
 

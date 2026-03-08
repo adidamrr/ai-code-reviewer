@@ -256,6 +256,26 @@ class CandidateFindingEnvelope(Model):
     suggestions: list[CandidateFinding] = Field(default_factory=list)
 
 
+class FindingOutline(Model):
+    filePath: str
+    lineStart: int
+    lineEnd: int
+    severity: str
+    category: str
+    shortLabel: str
+    confidence: float
+    evidenceRefs: list[str] = Field(default_factory=list)
+
+
+class FindingOutlineEnvelope(Model):
+    findings: list[FindingOutline] = Field(default_factory=list)
+
+
+class FindingExplanation(Model):
+    title: str
+    body: str
+
+
 class Evidence(Model):
     evidenceId: str
     type: Literal["code", "rule", "doc", "history"]
@@ -320,6 +340,7 @@ class HunkTask(Model):
     filePath: str
     language: str
     languageSlug: str
+    fileClass: str = "logic"
     patch: str
     hunkIndex: int
     hunkHeader: str

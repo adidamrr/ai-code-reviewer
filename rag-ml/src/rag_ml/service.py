@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable
 
 import numpy as np
 
+from .bug_rules import rule_based_bug_candidates
 from .citation_resolver import CitationResolver
 from .config import RagConfig, load_config
 from .context_builder import build_context_pack
@@ -21,16 +22,15 @@ from .kb_chunker import chunk_documents
 from .kb_inventory import build_inventory, write_inventory
 from .kb_loader import collect_document_descriptors
 from .kb_normalizer import normalize_descriptor
-from .language_mapper import to_slug
 from .ollama_client import OllamaClient, OllamaError
 from .query_builder import build_query
 from .ranking import build_ranked_suggestion, dedupe_and_rank, fingerprint_for_suggestion
-from .rule_fallbacks import style_fallback_candidates
 from .schemas import (
     BackendSuggestion,
     BuildManifest,
     BuildNamespaceMeta,
     ContextPack,
+    CandidateFinding,
     HunkTask,
     KnowledgeChunk,
     ProgressUpdate,
@@ -39,8 +39,10 @@ from .schemas import (
 )
 from .sparse_index import build_sparse_index, load_sparse_index
 from .static_signals import collect_static_signals
+from .style_rules import rule_based_style_candidates
 from .synthesizer import synthesize_suggestions
 from .validator import SuggestionValidator
+from .verifier import FindingVerifier
 
 
 def now_iso() -> str:
@@ -160,6 +162,17 @@ def _static_signals_for_task(static_checks, task: HunkTask) -> list:
     ]
 
 
+def _doc_retrieval_score(score_by_chunk: dict[str, float], evidence_refs: list[str]) -> float:
+    retrieval_scores = [
+        score_by_chunk.get(ref.split(":", 1)[1], 0.0)
+        for ref in evidence_refs
+        if ref.startswith("doc:")
+    ]
+    if not retrieval_scores:
+        return 0.0
+    return sum(retrieval_scores) / len(retrieval_scores)
+
+
 class RagRuntime:
     def __init__(self, config: RagConfig, chunks_by_id: dict[str, KnowledgeChunk]) -> None:
         self.config = config
@@ -179,6 +192,7 @@ class RagRuntime:
         self.generator = SuggestionGenerator(self.client)
         self.citation_resolver = CitationResolver(chunks_by_id)
         self.validator = SuggestionValidator()
+        self.verifier = FindingVerifier()
 
     def has_namespace(self, namespace: str) -> bool:
         return namespace in self.sparse_by_namespace and namespace in self.dense_by_namespace
@@ -435,6 +449,7 @@ async def analyze_request(
     )
 
     ranked_items = []
+    task_debug: list[dict[str, Any]] = []
     candidate_buffer_by_file: dict[str, int] = defaultdict(int)
     partial_failures = 0
     files_done = 0
@@ -455,6 +470,59 @@ async def analyze_request(
             completed_files.add(file_path)
             files_done += 1
         return files_done
+
+    def append_ranked_candidate(
+        candidate: CandidateFinding,
+        *,
+        task: HunkTask,
+        context_pack: ContextPack,
+        score_by_chunk: dict[str, float],
+        signals: list[Any],
+        stage_origin: str,
+    ) -> bool:
+        verification = runtime.verifier.verify(candidate, task, requested_scope, context_pack)
+        if not verification.valid:
+            return False
+        candidate = candidate.model_copy(
+            update={
+                "lineStart": verification.lineStart or candidate.lineStart,
+                "lineEnd": verification.lineEnd or candidate.lineEnd,
+            }
+        )
+        final_validation = runtime.validator.validate(candidate, task, requested_scope)
+        if not final_validation.valid:
+            return False
+        evidence, citations = runtime.citation_resolver.resolve(candidate.evidenceRefs, context_pack)
+        if not evidence:
+            return False
+        retrieval_score = _doc_retrieval_score(score_by_chunk, candidate.evidenceRefs)
+        suggestion = BackendSuggestion(
+            filePath=task.filePath,
+            lineStart=final_validation.lineStart or task.firstChangedLine,
+            lineEnd=final_validation.lineEnd or final_validation.lineStart or task.firstChangedLine,
+            severity=candidate.severity,
+            category=candidate.category,
+            title=candidate.title.strip(),
+            body=candidate.body.strip(),
+            evidence=evidence,
+            citations=citations,
+            confidence=candidate.confidence,
+            fingerprint="",
+            meta={"stageOrigin": stage_origin, "taskId": task.taskId, "fileClass": task.fileClass},
+        )
+        suggestion = suggestion.model_copy(update={"fingerprint": fingerprint_for_suggestion(suggestion)})
+        ranked_items.append(
+            build_ranked_suggestion(
+                suggestion,
+                retrieval_score=retrieval_score,
+                planner_priority=task.priority,
+                static_support=min(1.0, len(signals) / 3.0),
+                repo_feedback_score=0.0,
+            )
+        )
+        candidate_buffer_by_file[task.filePath] += 1
+        return True
+
     for task_index, task in enumerate(planned_tasks, start=1):
         if candidate_buffer_by_file[task.filePath] >= request.limits.maxPerFile * 2:
             continue
@@ -472,12 +540,27 @@ async def analyze_request(
             ),
         )
         try:
+            debug = {
+                "taskId": task.taskId,
+                "filePath": task.filePath,
+                "fileClass": task.fileClass,
+                "categories": task.categories,
+                "detected": 0,
+                "accepted": 0,
+                "ruleCandidates": 0,
+                "modelOutlines": 0,
+                "rejected": defaultdict(int),
+            }
             if task.languageSlug not in config.supported_languages or not runtime.has_namespace(task.languageSlug):
                 partial_failures += 1
+                debug["rejected"]["unsupported_namespace"] += 1
+                task_debug.append({**debug, "rejected": dict(debug["rejected"])})
                 mark_task_complete(task.filePath)
                 continue
             active_categories = [category for category in task.categories if category in requested_scope]
             if not active_categories:
+                debug["rejected"]["category_not_requested"] += 1
+                task_debug.append({**debug, "rejected": dict(debug["rejected"])})
                 mark_task_complete(task.filePath)
                 continue
 
@@ -496,101 +579,104 @@ async def analyze_request(
             signals = _static_signals_for_task(static_checks, task)
             context_pack: ContextPack = build_context_pack(task, signals, merged_hits)
             score_by_chunk = {hit.chunkId: hit.finalScore for hit in merged_hits}
-            max_suggestions = max(1, min(2, request.limits.maxPerFile * 2 - candidate_buffer_by_file[task.filePath]))
-            envelope = await runtime.generator.generate(
-                task,
-                active_categories,
-                context_pack,
-                max_suggestions=max_suggestions,
-            )
-
             accepted_any = False
-            for candidate in envelope.suggestions:
-                candidate = candidate.model_copy(update={"filePath": task.filePath})
-                validation = runtime.validator.validate(candidate, task, requested_scope)
-                if not validation.valid:
-                    continue
-                evidence, citations = runtime.citation_resolver.resolve(candidate.evidenceRefs, context_pack)
-                if not evidence:
-                    continue
-                retrieval_scores = [score_by_chunk.get(ref.split(":", 1)[1], 0.0) for ref in candidate.evidenceRefs if ref.startswith("doc:")]
-                retrieval_score = sum(retrieval_scores) / len(retrieval_scores) if retrieval_scores else 0.0
-                suggestion = BackendSuggestion(
-                    filePath=task.filePath,
-                    lineStart=validation.lineStart or task.firstChangedLine,
-                    lineEnd=validation.lineEnd or validation.lineStart or task.firstChangedLine,
-                    severity=candidate.severity,
-                    category=candidate.category,
-                    title=candidate.title.strip(),
-                    body=candidate.body.strip(),
-                    evidence=evidence,
-                    citations=citations,
-                    confidence=candidate.confidence,
-                    fingerprint="",
-                    meta={"stageOrigin": "review", "taskId": task.taskId},
-                )
-                suggestion = suggestion.model_copy(update={"fingerprint": fingerprint_for_suggestion(suggestion)})
-                ranked_items.append(
-                    build_ranked_suggestion(
-                        suggestion,
-                        retrieval_score=retrieval_score,
-                        planner_priority=task.priority,
-                        static_support=min(1.0, len(signals) / 3.0),
-                        repo_feedback_score=0.0,
-                    )
-                )
-                candidate_buffer_by_file[task.filePath] += 1
-                accepted_any = True
+            deterministic_candidates: list[CandidateFinding] = []
+            if "style" in active_categories:
+                style_hits = hits_by_category.get("style", [])
+                deterministic_candidates.extend(rule_based_style_candidates(task, style_hits))
+            if any(category in active_categories for category in ("bugs", "security")):
+                deterministic_candidates.extend(rule_based_bug_candidates(task, signals))
+            debug["ruleCandidates"] = len(deterministic_candidates)
 
-            if not accepted_any and "style" in hits_by_category:
-                for candidate in style_fallback_candidates(task, hits_by_category["style"]):
-                    validation = runtime.validator.validate(candidate, task, requested_scope)
-                    if not validation.valid:
-                        continue
-                    evidence, citations = runtime.citation_resolver.resolve(candidate.evidenceRefs, context_pack)
-                    if not evidence:
-                        continue
-                    retrieval_scores = [score_by_chunk.get(ref.split(":", 1)[1], 0.0) for ref in candidate.evidenceRefs if ref.startswith("doc:")]
-                    retrieval_score = sum(retrieval_scores) / len(retrieval_scores) if retrieval_scores else 0.0
-                    suggestion = BackendSuggestion(
-                        filePath=task.filePath,
-                        lineStart=validation.lineStart or task.firstChangedLine,
-                        lineEnd=validation.lineEnd or validation.lineStart or task.firstChangedLine,
-                        severity=candidate.severity,
-                        category=candidate.category,
-                        title=candidate.title.strip(),
-                        body=candidate.body.strip(),
-                        evidence=evidence,
-                        citations=citations,
-                        confidence=candidate.confidence,
-                        fingerprint="",
-                        meta={"stageOrigin": "fallback", "taskId": task.taskId},
-                    )
-                    suggestion = suggestion.model_copy(update={"fingerprint": fingerprint_for_suggestion(suggestion)})
-                    ranked_items.append(
-                        build_ranked_suggestion(
-                            suggestion,
-                            retrieval_score=retrieval_score,
-                            planner_priority=task.priority,
-                            static_support=min(1.0, len(signals) / 3.0),
-                            repo_feedback_score=0.0,
-                        )
-                    )
-                    candidate_buffer_by_file[task.filePath] += 1
+            for candidate in deterministic_candidates:
+                debug["detected"] += 1
+                if append_ranked_candidate(
+                    candidate,
+                    task=task,
+                    context_pack=context_pack,
+                    score_by_chunk=score_by_chunk,
+                    signals=signals,
+                    stage_origin="rules",
+                ):
+                    debug["accepted"] += 1
                     accepted_any = True
+                else:
+                    debug["rejected"]["rule_candidate_rejected"] += 1
+
+            if candidate_buffer_by_file[task.filePath] < request.limits.maxPerFile * 2:
+                max_suggestions = max(1, min(2, request.limits.maxPerFile * 2 - candidate_buffer_by_file[task.filePath]))
+                try:
+                    outlines = await runtime.generator.detect(
+                        task,
+                        active_categories,
+                        context_pack,
+                        max_findings=max_suggestions,
+                    )
+                except Exception as error:
+                    debug["rejected"]["invalid_json"] += 1
+                    outlines = None
+                    if not accepted_any:
+                        raise error
+
+                if outlines is not None:
+                    debug["modelOutlines"] = len(outlines.findings)
+                    for outline in outlines.findings:
+                        debug["detected"] += 1
+                        provisional = CandidateFinding(
+                            filePath=task.filePath,
+                            lineStart=outline.lineStart,
+                            lineEnd=outline.lineEnd,
+                            severity=outline.severity,
+                            category=outline.category,
+                            title=outline.shortLabel.strip(),
+                            body=outline.shortLabel.strip(),
+                            confidence=outline.confidence,
+                            evidenceRefs=outline.evidenceRefs,
+                        )
+                        verification = runtime.verifier.verify(provisional, task, requested_scope, context_pack)
+                        if not verification.valid:
+                            debug["rejected"][verification.reason or "verification_failed"] += 1
+                            continue
+                        explained = await runtime.generator.explain(task, outline, context_pack)
+                        if append_ranked_candidate(
+                            explained,
+                            task=task,
+                            context_pack=context_pack,
+                            score_by_chunk=score_by_chunk,
+                            signals=signals,
+                            stage_origin="model",
+                        ):
+                            debug["accepted"] += 1
+                            accepted_any = True
+                        else:
+                            debug["rejected"]["final_validation_failed"] += 1
 
             mark_task_complete(task.filePath)
+            task_debug.append({**debug, "rejected": dict(debug["rejected"])})
+            reject_summary = ", ".join(
+                f"{key}={value}" for key, value in sorted(dict(debug["rejected"]).items()) if value
+            ) or "none"
             await _emit_progress(
                 progress_callback,
                 ProgressUpdate(
                     stage="review",
-                    message="Hotspot-задача обработана.",
+                    message=(
+                        "Hotspot-задача обработана. "
+                        f"detected={debug['detected']} accepted={debug['accepted']} rejected={reject_summary}"
+                    ),
                     filePath=task.filePath,
                     stageDone=task_index,
                     stageTotal=len(planned_tasks),
                     filesDone=files_done,
                     filesTotal=total_files,
-                    meta={"taskId": task.taskId, "accepted": accepted_any},
+                    meta={
+                        "taskId": task.taskId,
+                        "accepted": accepted_any,
+                        "fileClass": task.fileClass,
+                        "detected": debug["detected"],
+                        "acceptedCount": debug["accepted"],
+                        "rejectedReasons": dict(debug["rejected"]),
+                    },
                 ),
             )
         except Exception as error:
@@ -648,6 +734,7 @@ async def analyze_request(
             "overview": overview.model_dump(),
             "taskCount": len(planned_tasks),
             "staticSignals": len(static_checks.signals),
+            "taskDebug": task_debug,
         },
     )
     return response.model_dump()

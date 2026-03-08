@@ -7,8 +7,10 @@ from .schemas import HunkTask
 IDENTIFIER_REGEX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 STRING_LITERAL = re.compile(r"(['\"]).*?\1")
 SNAKE_OR_MIXED_IDENTIFIER = re.compile(r"\b[A-Za-z]+_[A-Za-z0-9_]+\b")
-UPPER_START_IDENTIFIER = re.compile(r"\b[A-Z][A-Za-z0-9_]*\b")
 TYPE_DECLARATION = re.compile(r"\b(?:class|enum|typedef|extension)\s+([A-Za-z_][A-Za-z0-9_]*)")
+DART_IDENTIFIER_DECLARATION = re.compile(
+    r"\b(?:final|var|late|int|double|String|bool|num|dynamic|VoidCallback)\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
 
 CATEGORY_FOCUS = {
     "style": "naming consistency conventions readability lint rules",
@@ -36,7 +38,8 @@ def _style_focus_hints(lines: list[str]) -> str:
     hints: list[str] = []
     if SNAKE_OR_MIXED_IDENTIFIER.search(joined):
         hints.append("lowerCamelCase non-constant identifier names")
-    if UPPER_START_IDENTIFIER.search(joined):
+    declared_identifiers = DART_IDENTIFIER_DECLARATION.findall(joined)
+    if any(identifier and identifier[:1].isupper() for identifier in declared_identifiers):
         hints.append("variables should not use UpperCamelCase")
     declared_type_names = TYPE_DECLARATION.findall(joined)
     if any(name and not name[:1].isupper() for name in declared_type_names):
