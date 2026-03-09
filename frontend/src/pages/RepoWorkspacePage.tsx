@@ -28,6 +28,7 @@ export function RepoWorkspacePage() {
 
   const repo = useMemo(() => repos.find((item) => item.repoId === repoId) ?? null, [repoId, repos]);
   const workflow = getWorkflow(repoId);
+  const prLabel = session?.provider === "gitlab" ? "MR" : "PR";
   const [patchByFile, setPatchByFile] = useState<Record<string, string>>({});
   const [patchLoading, setPatchLoading] = useState(false);
   const [patchError, setPatchError] = useState<string | null>(null);
@@ -71,8 +72,8 @@ export function RepoWorkspacePage() {
     return (
       <div className="page-wrap">
         <section className="card stack-gap">
-          <h1>Сессия GitHub не активна</h1>
-          <p className="subline">Подключи GitHub на предыдущем шаге, затем возвращайся в workspace.</p>
+          <h1>SCM-сессия не активна</h1>
+          <p className="subline">Подключи GitHub/GitLab на предыдущем шаге, затем возвращайся в workspace.</p>
           <button className="primary-btn" onClick={() => navigate("/connect")}>Открыть подключение</button>
         </section>
       </div>
@@ -241,7 +242,7 @@ export function RepoWorkspacePage() {
           <p className="eyebrow">Repo Workspace</p>
           <h1>{repo.fullName}</h1>
           <p className="subline">
-            PR: {workflow.selectedPrNumber ? `#${workflow.selectedPrNumber}` : "не выбран"} ·
+            {prLabel}: {workflow.selectedPrNumber ? `#${workflow.selectedPrNumber}` : "не выбран"} ·
             {" "}
             Snapshot: {workflow.syncData?.snapshotId ?? "нет"}
           </p>
@@ -284,10 +285,10 @@ export function RepoWorkspacePage() {
             <input
               value={workflow.prSearch}
               onChange={(event) => actions.setPrSearch(repo.repoId, event.target.value)}
-              placeholder="Поиск PR"
+              placeholder={`Поиск ${prLabel}`}
             />
             <button className="secondary-btn" onClick={() => actions.loadPullRequests(repo.repoId)} disabled={busy}>
-              Загрузить PR
+              Загрузить список PR/MR
             </button>
           </div>
 
@@ -313,14 +314,14 @@ export function RepoWorkspacePage() {
             })}
 
             {filteredPrs.length === 0 ? (
-              <p className="empty-note">PR пока не загружены. Нажми «Загрузить PR».</p>
+              <p className="empty-note">PR пока не загружены. Нажми «Загрузить список PR/MR».</p>
             ) : null}
           </div>
 
           <div className="row-actions">
             <div className="sync-inline-card">
               <div className="sync-inline-head">
-                <h3>Синхронизация GitHub PR</h3>
+                <h3>Синхронизация PR/MR</h3>
                 <p className="subline">После sync сразу открываются параметры анализа.</p>
               </div>
               <div className="row-actions">
@@ -329,7 +330,7 @@ export function RepoWorkspacePage() {
                   disabled={!workflow.selectedPrNumber || busy}
                   onClick={() => actions.syncPullRequest(repo.repoId)}
                 >
-                  Синхронизировать PR #{workflow.selectedPrNumber ?? "?"}
+                  Синхронизировать #{workflow.selectedPrNumber ?? "?"}
                 </button>
                 {workflow.syncData ? (
                   <button className="secondary-btn" onClick={() => actions.setActiveStep(repo.repoId, "params")}>
@@ -346,7 +347,7 @@ export function RepoWorkspacePage() {
                   <span>idempotent: {String(workflow.syncData.idempotent)}</span>
                 </div>
               ) : (
-                <p className="empty-note">Выбери PR и запусти синхронизацию.</p>
+                <p className="empty-note">Выбери PR/MR и запусти синхронизацию.</p>
               )}
             </div>
           </div>
@@ -413,7 +414,7 @@ export function RepoWorkspacePage() {
             <button className="primary-btn" onClick={() => actions.createAnalysisJob(repo.repoId)} disabled={busy || !workflow.syncData}>
               Запустить анализ
             </button>
-            <button className="secondary-btn" onClick={() => actions.setActiveStep(repo.repoId, "pr")}>Назад к PR</button>
+            <button className="secondary-btn" onClick={() => actions.setActiveStep(repo.repoId, "pr")}>Назад к PR/MR</button>
           </div>
         </section>
       ) : null}
@@ -812,7 +813,7 @@ export function RepoWorkspacePage() {
 
           <label className="toggle-line">
             <input type="checkbox" checked={workflow.dryRun} onChange={(event) => actions.setDryRun(repo.repoId, event.target.checked)} />
-            dry-run (без отправки в GitHub)
+            dry-run (без отправки в Git-провайдер)
           </label>
 
           <div className="row-actions">

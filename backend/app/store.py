@@ -158,7 +158,8 @@ class InMemoryStore:
 
     def upsert_repository(self, data: dict[str, str]) -> dict[str, Any]:
         now = now_iso()
-        existing = next((item for item in self.repositories.values() if item["fullName"] == data["fullName"]), None)
+        provider = data.get("provider", "github")
+        existing = next((item for item in self.repositories.values() if item["fullName"] == data["fullName"] and item.get("provider", "github") == provider), None)
 
         if existing:
             existing["owner"] = data["owner"]
@@ -176,7 +177,7 @@ class InMemoryStore:
 
         created = {
             "id": f"repo_{uuid4()}",
-            "provider": "github",
+            "provider": provider,
             "installationId": installation["id"],
             "owner": data["owner"],
             "name": data["name"],

@@ -26,6 +26,7 @@ API_PREFIXES = (
     "/webhooks",
     "/integrations",
     "/github/session",
+    "/gitlab/session",
     "/repos",
     "/prs",
     "/snapshots",
@@ -69,6 +70,22 @@ def normalize_pr_state(value: Any) -> str:
 def map_file_status(value: str) -> str:
     if value in {"added", "removed", "renamed"}:
         return value
+    return "modified"
+
+
+def normalize_gitlab_mr_state(value: Any) -> str:
+    if value == "opened":
+        return "open"
+    return "closed"
+
+
+def map_gitlab_file_status(item: dict[str, Any]) -> str:
+    if bool(item.get("new_file")):
+        return "added"
+    if bool(item.get("deleted_file")):
+        return "removed"
+    if bool(item.get("renamed_file")):
+        return "renamed"
     return "modified"
 
 
@@ -132,6 +149,55 @@ async def fetch_pull_files(client: httpx.AsyncClient, token: str, owner: str, re
             break
 
     return files
+
+
+async def gitlab_request(client: httpx.AsyncClient, token: str, url: str) -> Any:
+    response = await client.get(
+        url,
+        headers={
+            "PRIVATE-TOKEN": token,
+            "User-Agent": "SWAGReviewer-Python",
+        },
+    )
+
+    text = response.text
+    try:
+        data = json.loads(text) if text else None
+    except json.JSONDecodeError:
+        data = None
+
+    if response.status_code >= 400:
+        message = data.get("message") if isinstance(data, dict) else response.reason_phrase
+        raise HttpError(
+            response.status_code,
+            "gitlab_api_error",
+            f"GitLab API error: {message}",
+            {"url": url, "status": response.status_code},
+        )
+
+    return data
+
+
+async def fetch_gitlab_projects(client: httpx.AsyncClient, token: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for page in range(1, 11):
+        chunk = await gitlab_request(client, token, f"https://gitlab.com/api/v4/projects?membership=true&per_page=100&page={page}")
+        if not isinstance(chunk, list) or len(chunk) == 0:
+            break
+        items.extend(chunk)
+        if len(chunk) < 100:
+            break
+    return items
+
+
+async def fetch_gitlab_mr_changes(client: httpx.AsyncClient, token: str, project_id: str, mr_iid: int) -> list[dict[str, Any]]:
+    payload = await gitlab_request(client, token, f"https://gitlab.com/api/v4/projects/{project_id}/merge_requests/{mr_iid}/changes")
+    if not isinstance(payload, dict):
+        return []
+    changes = payload.get("changes")
+    if not isinstance(changes, list):
+        return []
+    return [item for item in changes if isinstance(item, dict)]
 
 
 async def parse_json_body(request: Request) -> dict[str, Any]:
@@ -303,18 +369,20 @@ def create_app(config: AppConfig) -> FastAPI:
         if not github_login:
             raise HttpError(502, "github_api_error", "GitHub API error: Invalid /user response")
 
-        session = github_sessions.create(token, github_login)
+        session = github_sessions.create(token, github_login, provider="github")
         return {
             "sessionId": session["id"],
+            "provider": "github",
             "githubLogin": session["githubLogin"],
             "expiresAt": session["expiresAt"],
         }
 
     @app.get("/github/session/{session_id}")
     async def get_github_session(session_id: str) -> dict[str, Any]:
-        session = github_sessions.get(session_id)
+        session = github_sessions.get_for_provider(session_id, "github")
         return {
             "sessionId": session["id"],
+            "provider": session.get("provider", "github"),
             "githubLogin": session["githubLogin"],
             "expiresAt": session["expiresAt"],
             "createdAt": session["createdAt"],
@@ -327,7 +395,7 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.get("/github/session/{session_id}/repos")
     async def github_session_repos(session_id: str, request: Request) -> dict[str, Any]:
-        session = github_sessions.get(session_id)
+        session = github_sessions.get_for_provider(session_id, "github")
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             repos = await fetch_user_repos(client, session["token"])
@@ -350,6 +418,7 @@ def create_app(config: AppConfig) -> FastAPI:
                     "fullName": full_name,
                     "defaultBranch": default_branch,
                     "accountLogin": session["githubLogin"],
+                    "provider": "github",
                 }
             )
 
@@ -357,6 +426,7 @@ def create_app(config: AppConfig) -> FastAPI:
                 {
                     "repoId": backend_repo["id"],
                     "providerRepoId": repo.get("id"),
+                    "provider": "github",
                     "owner": owner_login,
                     "name": repo_name,
                     "fullName": full_name,
@@ -374,7 +444,7 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.get("/github/session/{session_id}/repos/{owner}/{repo}/prs")
     async def github_session_prs(session_id: str, owner: str, repo: str, request: Request) -> dict[str, Any]:
-        session = github_sessions.get(session_id)
+        session = github_sessions.get_for_provider(session_id, "github")
         state = normalize_pr_state(request.query_params.get("state"))
 
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -416,7 +486,7 @@ def create_app(config: AppConfig) -> FastAPI:
         if pr_number <= 0:
             raise HttpError(400, "validation_error", "prNumber must be a positive integer")
 
-        session = github_sessions.get(session_id)
+        session = github_sessions.get_for_provider(session_id, "github")
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             pr, files = await gather_pr_data(client, session["token"], owner, repo, pr_number)
@@ -428,6 +498,7 @@ def create_app(config: AppConfig) -> FastAPI:
                 "fullName": f"{owner}/{repo}",
                 "defaultBranch": "main",
                 "accountLogin": session["githubLogin"],
+                "provider": "github",
             }
         )
 
@@ -463,6 +534,150 @@ def create_app(config: AppConfig) -> FastAPI:
             "counts": sync_result["counts"],
             "idempotent": sync_result["idempotent"],
             "source": "github_session",
+        }
+
+    @app.post("/gitlab/session", status_code=201)
+    async def create_gitlab_session(request: Request) -> dict[str, Any]:
+        body = await parse_json_body(request)
+        token = str(body.get("token") or "").strip()
+        if not token:
+            raise HttpError(400, "validation_error", "token is required")
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            user = await gitlab_request(client, token, "https://gitlab.com/api/v4/user")
+
+        gitlab_login = str(user.get("username") or "") if isinstance(user, dict) else ""
+        if not gitlab_login:
+            raise HttpError(502, "gitlab_api_error", "GitLab API error: Invalid /user response")
+
+        session = github_sessions.create(token, gitlab_login, provider="gitlab")
+        return {"sessionId": session["id"], "provider": "gitlab", "githubLogin": session["githubLogin"], "expiresAt": session["expiresAt"]}
+
+    @app.delete("/gitlab/session/{session_id}", status_code=204)
+    async def delete_gitlab_session(session_id: str):
+        github_sessions.delete(session_id)
+        return Response(status_code=204)
+
+    @app.get("/gitlab/session/{session_id}/repos")
+    async def gitlab_session_repos(session_id: str, request: Request) -> dict[str, Any]:
+        session = github_sessions.get_for_provider(session_id, "gitlab")
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            repos = await fetch_gitlab_projects(client, session["token"])
+
+        normalized = []
+        for repo in repos:
+            owner_login = str((repo.get("namespace") or {}).get("path") or session["githubLogin"])
+            repo_name = str(repo.get("path") or "")
+            full_name = str(repo.get("path_with_namespace") or f"{owner_login}/{repo_name}")
+            default_branch = str(repo.get("default_branch") or "main")
+            project_id = str(repo.get("id") or "")
+
+            backend_repo = store.upsert_repository(
+                {
+                    "owner": owner_login,
+                    "name": repo_name,
+                    "fullName": full_name,
+                    "defaultBranch": default_branch,
+                    "accountLogin": session["githubLogin"],
+                    "provider": "gitlab",
+                }
+            )
+
+            normalized.append(
+                {
+                    "repoId": backend_repo["id"],
+                    "providerRepoId": project_id,
+                    "provider": "gitlab",
+                    "owner": owner_login,
+                    "name": repo_name,
+                    "fullName": full_name,
+                    "defaultBranch": default_branch,
+                    "private": str(repo.get("visibility") or "private") != "public",
+                }
+            )
+
+        page = paginate(normalized, request.query_params.get("cursor"), request.query_params.get("limit"))
+        return {"items": page["items"], "nextCursor": page["nextCursor"], "limit": page["limit"]}
+
+    @app.get("/gitlab/session/{session_id}/repos/{project_id}/mrs")
+    async def gitlab_session_mrs(session_id: str, project_id: str, request: Request) -> dict[str, Any]:
+        session = github_sessions.get_for_provider(session_id, "gitlab")
+        state = normalize_pr_state(request.query_params.get("state"))
+        gitlab_state = "opened" if state == "open" else state
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            mrs = await gitlab_request(client, session["token"], f"https://gitlab.com/api/v4/projects/{project_id}/merge_requests?scope=all&state={gitlab_state}&per_page=100")
+        if not isinstance(mrs, list):
+            mrs = []
+        items = []
+        for mr in mrs:
+            if not isinstance(mr, dict):
+                continue
+
+            diff_refs = mr.get("diff_refs") or {}
+            items.append(
+                {
+                    "number": mr.get("iid"),
+                    "title": mr.get("title"),
+                    "state": normalize_gitlab_mr_state(mr.get("state")),
+                    "url": mr.get("web_url"),
+                    "authorLogin": (mr.get("author") or {}).get("username"),
+                    "baseSha": diff_refs.get("base_sha"),
+                    "headSha": mr.get("sha"),
+                    "updatedAt": mr.get("updated_at"),
+                }
+            )
+        return {"items": items, "count": len(items)}
+
+    @app.post("/gitlab/session/{session_id}/repos/{project_id}/mrs/{mr_iid}/sync")
+    async def gitlab_session_sync(session_id: str, project_id: str, mr_iid: int) -> dict[str, Any]:
+        if mr_iid <= 0:
+            raise HttpError(400, "validation_error", "mrIid must be a positive integer")
+        session = github_sessions.get_for_provider(session_id, "gitlab")
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            mr = await gitlab_request(client, session["token"], f"https://gitlab.com/api/v4/projects/{project_id}/merge_requests/{mr_iid}")
+            files = await fetch_gitlab_mr_changes(client, session["token"], project_id, mr_iid)
+            project = await gitlab_request(client, session["token"], f"https://gitlab.com/api/v4/projects/{project_id}")
+        full_name = str((project or {}).get("path_with_namespace") or f"gitlab/{project_id}")
+        owner = full_name.split("/")[0]
+        name = full_name.split("/")[-1]
+        backend_repo = store.upsert_repository(
+            {
+                "owner": owner,
+                "name": name,
+                "fullName": full_name,
+                "defaultBranch": str((project or {}).get("default_branch") or "main"),
+                "accountLogin": session["githubLogin"],
+                "provider": "gitlab",
+            }
+        )
+        sync_result = store.sync_pull_request(
+            backend_repo["id"],
+            int(mr.get("iid") or mr_iid),
+            {
+                "title": mr.get("title"),
+                "state": normalize_gitlab_mr_state(mr.get("state")),
+                "authorLogin": (mr.get("author") or {}).get("username"),
+                "url": mr.get("web_url"),
+                "baseSha": (mr.get("diff_refs") or {}).get("base_sha"),
+                "headSha": mr.get("sha"),
+                "commitSha": mr.get("sha"),
+                "files": [
+                    {
+                        "path": file.get("new_path") or file.get("old_path"),
+                        "status": map_gitlab_file_status(file),
+                        "patch": file.get("diff") or "",
+                    }
+                    for file in files[:500]
+                ],
+            },
+        )
+        return {
+            "repoId": backend_repo["id"],
+            "prId": sync_result["pr"]["id"],
+            "snapshotId": sync_result["snapshot"]["id"],
+            "counts": sync_result["counts"],
+            "idempotent": sync_result["idempotent"],
+            "source": "gitlab_session",
         }
 
     @app.get("/repos")

@@ -12,12 +12,14 @@ class GithubSessionStore:
     def __init__(self) -> None:
         self._sessions: dict[str, dict[str, str]] = {}
 
-    def create(self, token: str, github_login: str) -> dict[str, str]:
+    def create(self, token: str, github_login: str, provider: str = "github") -> dict[str, str]:
         now = datetime.now(timezone.utc)
+        prefix = "gls" if provider == "gitlab" else "ghs"
         session = {
-            "id": f"ghs_{uuid4()}",
+            "id": f"{prefix}_{uuid4()}",
             "token": token,
             "githubLogin": github_login,
+            "provider": provider,
             "createdAt": now.isoformat().replace("+00:00", "Z"),
             "expiresAt": (now + timedelta(seconds=SESSION_TTL_SECONDS)).isoformat().replace("+00:00", "Z"),
         }
@@ -35,6 +37,12 @@ class GithubSessionStore:
             self._sessions.pop(session_id, None)
             raise HttpError(401, "github_session_expired", f"GitHub session expired: {session_id}")
 
+        return session
+
+    def get_for_provider(self, session_id: str, provider: str) -> dict[str, str]:
+        session = self.get(session_id)
+        if session.get("provider") != provider:
+            raise HttpError(404, "session_not_found", f"{provider} session not found: {session_id}")
         return session
 
     def delete(self, session_id: str) -> None:
