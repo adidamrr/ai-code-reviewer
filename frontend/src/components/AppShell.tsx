@@ -19,7 +19,7 @@ export function AppShell() {
 
         <nav className="primary-nav">
           <NavLink to="/connect" className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}>
-            Подключение GitHub
+            Подключение Git SCM
           </NavLink>
           <NavLink to="/repos" className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}>
             Репозитории
@@ -60,16 +60,16 @@ export function AppShell() {
         </section>
 
         <footer className="sidebar-footer">
-          <p className="session-line">{session ? `Сессия: ${session.githubLogin}` : "Сессия: не подключена"}</p>
+          <p className="session-line">{session ? `Сессия: ${session.provider.toUpperCase()} / ${session.githubLogin}` : "Сессия: не подключена"}</p>
           {session ? (
             <button
               className="secondary-btn full"
               onClick={async () => {
-                await actions.disconnectGithub();
+                await actions.disconnectScm();
                 navigate("/connect");
               }}
             >
-              Отключить GitHub
+              Отключить SCM
             </button>
           ) : null}
         </footer>

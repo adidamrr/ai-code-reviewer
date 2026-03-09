@@ -63,8 +63,21 @@ export class ApiClient {
     });
   }
 
+  createGitlabSession(token: string) {
+    return this.request<GithubSession>("/gitlab/session", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
+  }
+
   deleteGithubSession(sessionId: string) {
     return this.request<void>(`/github/session/${sessionId}`, {
+      method: "DELETE",
+    });
+  }
+
+  deleteGitlabSession(sessionId: string) {
+    return this.request<void>(`/gitlab/session/${sessionId}`, {
       method: "DELETE",
     });
   }
@@ -79,15 +92,40 @@ export class ApiClient {
     );
   }
 
+  getGitlabRepos(sessionId: string, cursor?: string | null) {
+    const search = new URLSearchParams();
+    if (cursor) {
+      search.set("cursor", cursor);
+    }
+    return this.request<CursorPage<GithubRepo>>(
+      `/gitlab/session/${sessionId}/repos${search.size ? `?${search.toString()}` : ""}`,
+    );
+  }
+
   getGithubPrs(sessionId: string, owner: string, repo: string, state: "open" | "closed" | "all" = "open") {
     return this.request<{ items: GithubPr[]; count: number }>(
       `/github/session/${sessionId}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/prs?state=${state}`,
     );
   }
 
+  getGitlabMrs(sessionId: string, projectId: string, state: "open" | "closed" | "all" = "open") {
+    return this.request<{ items: GithubPr[]; count: number }>(
+      `/gitlab/session/${sessionId}/repos/${encodeURIComponent(projectId)}/mrs?state=${state}`,
+    );
+  }
+
   syncGithubPr(sessionId: string, owner: string, repo: string, prNumber: number) {
     return this.request<SyncResponse>(
       `/github/session/${sessionId}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/prs/${prNumber}/sync`,
+      {
+        method: "POST",
+      },
+    );
+  }
+
+  syncGitlabMr(sessionId: string, projectId: string, mrIid: number) {
+    return this.request<SyncResponse>(
+      `/gitlab/session/${sessionId}/repos/${encodeURIComponent(projectId)}/mrs/${mrIid}/sync`,
       {
         method: "POST",
       },

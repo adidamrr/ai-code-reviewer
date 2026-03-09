@@ -4,13 +4,15 @@ export type WorkspaceStep = "pr" | "params" | "job" | "results" | "publish" | "f
 
 export interface GithubSession {
   sessionId: string;
+  provider: "github" | "gitlab";
   githubLogin: string;
   expiresAt: string;
 }
 
 export interface GithubRepo {
   repoId: string;
-  providerRepoId: number;
+  providerRepoId: number | string;
+  provider: "github" | "gitlab";
   owner: string;
   name: string;
   fullName: string;

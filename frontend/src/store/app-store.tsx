@@ -159,6 +159,8 @@ interface AppState {
   backendUrl: string;
   serviceToken: string;
   githubToken: string;
+  gitlabToken: string;
+  scmProvider: "github" | "gitlab";
   session: GithubSession | null;
 
   repos: GithubRepo[];
@@ -195,11 +197,13 @@ interface AppStoreActions {
   setBackendUrl: (value: string) => void;
   setServiceToken: (value: string) => void;
   setGithubToken: (value: string) => void;
+  setGitlabToken: (value: string) => void;
+  setScmProvider: (value: "github" | "gitlab") => void;
 
   clearError: () => void;
 
-  connectGithub: () => Promise<boolean>;
-  disconnectGithub: () => Promise<void>;
+  connectScm: () => Promise<boolean>;
+  disconnectScm: () => Promise<void>;
   checkBackendHealth: () => Promise<{ ok: boolean; status: string }>;
 
   loadRepos: (reset?: boolean) => Promise<void>;
@@ -261,6 +265,8 @@ const initialState: AppState = {
   backendUrl: DEFAULT_BACKEND,
   serviceToken: DEFAULT_SERVICE_TOKEN,
   githubToken: "",
+  gitlabToken: "",
+  scmProvider: "github",
   session: null,
   repos: [],
   repoCursor: null,
@@ -367,7 +373,10 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       let pageCount = 0;
 
       while (pageCount < 30) {
-        const page: CursorPage<GithubRepo> = await api.getGithubRepos(sessionId, cursor);
+        const provider = stateRef.current.session?.provider ?? "github";
+        const page: CursorPage<GithubRepo> = provider === "gitlab"
+          ? await api.getGitlabRepos(sessionId, cursor)
+          : await api.getGithubRepos(sessionId, cursor);
         pageCount += 1;
 
         for (const repo of page.items) {
@@ -488,7 +497,10 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
     async (sessionId: string, reset: boolean) => {
       const current = stateRef.current;
       const api = apiFactory();
-      const page = await api.getGithubRepos(sessionId, reset ? null : current.repoCursor);
+      const provider = stateRef.current.session?.provider ?? "github";
+      const page = provider === "gitlab"
+        ? await api.getGitlabRepos(sessionId, reset ? null : current.repoCursor)
+        : await api.getGithubRepos(sessionId, reset ? null : current.repoCursor);
 
       setState((prev) => {
         const merged = reset ? page.items : [...prev.repos, ...page.items];
@@ -611,20 +623,29 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
         setState((prev) => ({ ...prev, githubToken: value }));
       },
 
+      setGitlabToken: (value) => {
+        setState((prev) => ({ ...prev, gitlabToken: value }));
+      },
+
+      setScmProvider: (value) => {
+        setState((prev) => ({ ...prev, scmProvider: value }));
+      },
+
       clearError: () => {
         setState((prev) => ({ ...prev, error: null }));
       },
 
-      connectGithub: async () => {
-        const token = stateRef.current.githubToken.trim();
+      connectScm: async () => {
+        const provider = stateRef.current.scmProvider;
+        const token = (provider === "gitlab" ? stateRef.current.gitlabToken : stateRef.current.githubToken).trim();
         if (!token) {
-          setState((prev) => ({ ...prev, error: "Требуется GitHub токен" }));
+          setState((prev) => ({ ...prev, error: provider === "gitlab" ? "Требуется GitLab токен" : "Требуется GitHub токен" }));
           return false;
         }
 
-        await runTask("GitHub сессия создана", async () => {
+        await runTask(`${provider === "gitlab" ? "GitLab" : "GitHub"} сессия создана`, async () => {
           const api = apiFactory();
-          const session = await api.createGithubSession(token);
+          const session = provider === "gitlab" ? await api.createGitlabSession(token) : await api.createGithubSession(token);
 
           setState((prev) => ({
             ...prev,
@@ -639,15 +660,19 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
         return true;
       },
 
-      disconnectGithub: async () => {
+      disconnectScm: async () => {
         const current = stateRef.current;
         if (!current.session) {
           return;
         }
 
-        await runTask("GitHub сессия удалена", async () => {
+        await runTask(`${current.session!.provider === "gitlab" ? "GitLab" : "GitHub"} сессия удалена`, async () => {
           const api = apiFactory();
-          await api.deleteGithubSession(current.session!.sessionId);
+          if (current.session!.provider === "gitlab") {
+            await api.deleteGitlabSession(current.session!.sessionId);
+          } else {
+            await api.deleteGithubSession(current.session!.sessionId);
+          }
 
           setState((prev) => ({
             ...prev,
@@ -676,7 +701,7 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       loadRepos: async (reset = false) => {
         const sessionId = stateRef.current.session?.sessionId;
         if (!sessionId) {
-          setState((prev) => ({ ...prev, error: "Нет активной GitHub сессии" }));
+          setState((prev) => ({ ...prev, error: "Нет активной SCM-сессии" }));
           return;
         }
 
@@ -693,7 +718,7 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       runDebugSuite: async () => {
         const sessionId = stateRef.current.session?.sessionId;
         if (!sessionId) {
-          setState((prev) => ({ ...prev, error: "Нет активной GitHub сессии" }));
+          setState((prev) => ({ ...prev, error: "Нет активной SCM-сессии" }));
           return;
         }
 
@@ -771,7 +796,10 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
                 selectedPrNumber: preset.prNumber,
               }));
 
-              const sync = await api.syncGithubPr(sessionId, repo.owner, repo.name, preset.prNumber);
+              const session = stateRef.current.session;
+              const sync = session?.provider === "gitlab"
+                ? await api.syncGitlabMr(sessionId, String(repo.providerRepoId), preset.prNumber)
+                : await api.syncGithubPr(sessionId, repo.owner, repo.name, preset.prNumber);
 
               upsertWorkflow(repo.repoId, (workflow) => ({
                 ...workflow,
@@ -879,13 +907,15 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
         const workflow = stateRef.current.workflows[repoId] ?? createDefaultWorkflow(repoId, workspacePreferencesRef.current[repoId]);
 
         if (!session || !repo) {
-          setState((prev) => ({ ...prev, error: "Сначала подключите GitHub и выберите репозиторий" }));
+          setState((prev) => ({ ...prev, error: "Сначала подключите SCM и выберите репозиторий" }));
           return;
         }
 
         await runTask(`PR загружены (${repo.fullName})`, async () => {
           const api = apiFactory();
-          const response = await api.getGithubPrs(session.sessionId, repo.owner, repo.name, workflow.prState);
+          const response = session.provider === "gitlab"
+            ? await api.getGitlabMrs(session.sessionId, String(repo.providerRepoId), workflow.prState)
+            : await api.getGithubPrs(session.sessionId, repo.owner, repo.name, workflow.prState);
 
           upsertWorkflow(repoId, (current) => ({
             ...current,
@@ -914,7 +944,9 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
 
         await runTask(`PR синхронизирован (${repo.fullName}#${workflow.selectedPrNumber})`, async () => {
           const api = apiFactory();
-          const sync = await api.syncGithubPr(session.sessionId, repo.owner, repo.name, workflow.selectedPrNumber!);
+          const sync = session.provider === "gitlab"
+            ? await api.syncGitlabMr(session.sessionId, String(repo.providerRepoId), workflow.selectedPrNumber!)
+            : await api.syncGithubPr(session.sessionId, repo.owner, repo.name, workflow.selectedPrNumber!);
 
           upsertWorkflow(repoId, (current) => ({
             ...current,
