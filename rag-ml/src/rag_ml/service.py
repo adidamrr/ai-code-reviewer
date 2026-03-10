@@ -515,7 +515,14 @@ async def analyze_request(
             citations=citations,
             confidence=candidate.confidence,
             fingerprint="",
-            meta={"stageOrigin": stage_origin, "taskId": task.taskId, "fileClass": task.fileClass},
+            meta={
+                "stageOrigin": stage_origin,
+                "taskId": task.taskId,
+                "fileClass": task.fileClass,
+                "language": task.languageSlug,
+                "fileRole": task.fileClass,
+                "promptContextVersion": "rag-v2",
+            },
         )
         suggestion = suggestion.model_copy(update={"fingerprint": fingerprint_for_suggestion(suggestion)})
         ranked_items.append(

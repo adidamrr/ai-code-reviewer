@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
+from typing import Any
 
 from .schemas import BackendSuggestion, Evidence, RankedSuggestion
 from .validator import normalize_title
@@ -38,6 +39,13 @@ def evidence_strength(evidence: list[Evidence]) -> float:
     return 0.3
 
 
+def evidence_signature(evidence: list[Evidence]) -> str:
+    types = sorted({item.type for item in evidence})
+    if not types:
+        return "none"
+    return "+".join(types)
+
+
 def build_ranked_suggestion(
     suggestion: BackendSuggestion,
     *,
@@ -48,6 +56,22 @@ def build_ranked_suggestion(
 ) -> RankedSuggestion:
     severity_weight = SEVERITY_WEIGHTS.get(suggestion.severity, 0.2)
     ev_strength = evidence_strength(suggestion.evidence)
+    ev_signature = evidence_signature(suggestion.evidence)
+    suggestion_meta: dict[str, Any] = dict(suggestion.meta)
+    suggestion_meta["rankFeatures"] = {
+        "confidence": suggestion.confidence,
+        "rankScore": 0.0,
+        "retrievalScore": retrieval_score,
+        "plannerPriority": planner_priority,
+        "staticSupport": static_support,
+        "repoFeedbackScore": repo_feedback_score,
+        "evidenceStrength": ev_strength,
+        "evidenceSignature": ev_signature,
+        "titleTemplate": f"{suggestion.category}:{normalize_title(suggestion.title)}",
+        "deliveryMode": suggestion.deliveryMode,
+        "category": suggestion.category,
+        "severity": suggestion.severity,
+    }
     rank_score = (
         0.30 * suggestion.confidence
         + 0.25 * ev_strength
@@ -57,8 +81,9 @@ def build_ranked_suggestion(
         + 0.05 * retrieval_score
         + 0.05 * severity_weight
     )
+    suggestion_meta["rankFeatures"]["rankScore"] = rank_score
     return RankedSuggestion(
-        suggestion=suggestion,
+        suggestion=suggestion.model_copy(update={"meta": suggestion_meta}),
         rankScore=rank_score,
         retrievalScore=retrieval_score,
         evidenceStrength=ev_strength,

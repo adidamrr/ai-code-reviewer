@@ -60,12 +60,23 @@ Response (RAG -> backend):
 - `partialFailures` integer
 
 ## Adaptation v1
-1. Backend computes historical feedback score by suggestion fingerprint.
-2. Result ordering in `GET /analysis-jobs/{jobId}/results` uses:
-   - higher feedback score first
-   - then higher severity
-   - then creation time
-3. No model fine-tuning in MVP.
+1. Backend snapshots ranking features per suggestion and aggregates feedback priors across:
+   - exact `fingerprint`
+   - `title_template`
+   - `category + severity + language`
+   - `delivery_mode`
+   - `confidence_bucket`
+   - `evidence_signature`
+2. Result ordering in `GET /analysis-jobs/{jobId}/results` uses a blended adaptive score:
+   - `0.55 * base_rank_score`
+   - `0.20 * fingerprint_prior`
+   - `0.10 * template_prior`
+   - `0.07 * category_prior`
+   - `0.05 * confidence_calibration`
+   - `0.03 * evidence_prior`
+3. If exact fingerprint feedback reaches `voteCount >= 3` and `smoothedUtility <= -0.5`, suggestion is downgraded from `inline` to `summary`.
+4. `POST /adaptation/retrain` trains a ridge-regularized linear utility model over stored feature snapshots and activates the new version.
+5. No base LLM fine-tuning in MVP; adaptation is applied at ranking/suppression level.
 
 ## UI PAT Session Flow (Demo Mode)
 1. `POST /github/session` with GitHub PAT.

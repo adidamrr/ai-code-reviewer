@@ -18,6 +18,7 @@ tags:
   - name: Analysis Jobs
   - name: Publishing
   - name: Feedback
+  - name: Adaptation
 paths:
   /healthz:
     get:
@@ -502,6 +503,30 @@ paths:
         '404':
           $ref: '#/components/responses/ErrorResponse'
 
+  /adaptation/status:
+    get:
+      tags: [Adaptation]
+      summary: Current feedback adaptation model status
+      responses:
+        '200':
+          description: Adaptation status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdaptationStatus'
+
+  /adaptation/retrain:
+    post:
+      tags: [Adaptation]
+      summary: Train and activate a new adaptation model version
+      responses:
+        '200':
+          description: Adaptation status after retrain
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdaptationStatus'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -794,6 +819,9 @@ components:
           items:
             $ref: '#/components/schemas/Citation'
         confidence: { type: number, minimum: 0, maximum: 1 }
+        meta:
+          type: object
+          additionalProperties: true
         createdAt: { type: string, format: date-time }
       required: [id, jobId, prId, snapshotId, fingerprint, filePath, lineStart, lineEnd, severity, category, title, body, citations, confidence, createdAt]
 
@@ -1059,3 +1087,27 @@ components:
               score: { type: integer }
             required: [severity, up, down, score]
       required: [prId, overall, byFile, byCategory, bySeverity]
+
+    AdaptationStatus:
+      type: object
+      properties:
+        currentVersion: { type: string }
+        trainedAt: { type: string, format: date-time }
+        trainingExamples: { type: integer, minimum: 0 }
+        health:
+          type: string
+          enum: [cold, ready]
+        snapshots: { type: integer, minimum: 0 }
+        feedbackSuggestions: { type: integer, minimum: 0 }
+        featureStats:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+        metrics:
+          type: object
+          properties:
+            weightedMae: { type: number }
+            weightedRmse: { type: number }
+          additionalProperties: true
+      required: [currentVersion, trainedAt, trainingExamples, health, snapshots, feedbackSuggestions, featureStats, metrics]

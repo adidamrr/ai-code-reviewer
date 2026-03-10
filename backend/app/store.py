@@ -5,7 +5,19 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from .adaptation import rerank_suggestions
+from .adaptation import (
+    FEATURE_STAT_TYPES,
+    add_vote_counts,
+    build_feature_stat,
+    build_training_priors,
+    category_key,
+    default_model_record,
+    encode_training_features,
+    feature_snapshot_from_suggestion,
+    rerank_suggestions,
+    train_reward_model,
+    vote_totals,
+)
 from .diff_utils import (
     build_related_call_sites,
     count_patch_changes,
@@ -94,6 +106,15 @@ class InMemoryStore:
         self.comments_by_pr: dict[str, list[str]] = {}
         self.feedback_votes: dict[str, dict[str, Any]] = {}
         self.feedback_by_comment: dict[str, list[str]] = {}
+        self.suggestion_feature_snapshots: dict[str, dict[str, Any]] = {}
+        self.adaptation_feature_stats: dict[str, dict[str, dict[str, Any]]] = {
+            stat_type: {} for stat_type in FEATURE_STAT_TYPES
+        }
+        bootstrap_model = default_model_record()
+        self.adaptation_model_versions: dict[str, dict[str, Any]] = {
+            bootstrap_model["version"]: bootstrap_model
+        }
+        self.active_adaptation_model_version = bootstrap_model["version"]
         self.publish_runs: dict[str, dict[str, Any]] = {}
         self.analysis_tasks: dict[str, asyncio.Task[Any]] = {}
         self.seed()
@@ -120,6 +141,125 @@ class InMemoryStore:
         }
         self.installations[installation["id"]] = installation
         self.repositories[repo["id"]] = repo
+
+    def _active_adaptation_model(self) -> dict[str, Any]:
+        return self.adaptation_model_versions[self.active_adaptation_model_version]
+
+    def _store_feature_snapshot(self, suggestion: dict[str, Any]) -> None:
+        snapshot = feature_snapshot_from_suggestion(
+            suggestion,
+            model_version=self._active_adaptation_model()["version"],
+        )
+        self.suggestion_feature_snapshots[suggestion["id"]] = snapshot
+
+    def _ensure_feature_snapshot(self, suggestion: dict[str, Any]) -> dict[str, Any]:
+        snapshot = self.suggestion_feature_snapshots.get(suggestion["id"])
+        if snapshot is None:
+            self._store_feature_snapshot(suggestion)
+            snapshot = self.suggestion_feature_snapshots[suggestion["id"]]
+        return snapshot
+
+    def _rebuild_adaptation_feature_stats(self) -> dict[str, dict[str, Any]]:
+        self.adaptation_feature_stats = {stat_type: {} for stat_type in FEATURE_STAT_TYPES}
+        by_suggestion: dict[str, dict[str, Any]] = {}
+
+        for comment in self.comments.values():
+            suggestion = self.suggestions.get(comment["suggestionId"])
+            if not suggestion:
+                continue
+
+            snapshot = self._ensure_feature_snapshot(suggestion)
+            vote_ids = self.feedback_by_comment.get(comment["id"], [])
+            votes = [self.feedback_votes[item_id] for item_id in vote_ids if item_id in self.feedback_votes]
+            totals = vote_totals(votes)
+            if totals["voteCount"] <= 0:
+                continue
+
+            suggestion_feedback = by_suggestion.setdefault(
+                suggestion["id"],
+                {
+                    "suggestionId": suggestion["id"],
+                    "upCount": 0,
+                    "downCount": 0,
+                    "voteCount": 0,
+                    "score": 0,
+                    "smoothedUtility": 0.0,
+                },
+            )
+            add_vote_counts(suggestion_feedback, totals["up"], totals["down"])
+
+            feature_pairs = (
+                ("fingerprint", snapshot["fingerprint"]),
+                ("title_template", snapshot["titleTemplate"]),
+                ("category", category_key(snapshot["category"], snapshot["severity"], snapshot["language"])),
+                ("delivery_mode", snapshot["deliveryMode"]),
+                ("confidence_bucket", snapshot["confidenceBucket"]),
+                ("evidence_signature", snapshot["evidenceSignature"]),
+            )
+            for key_type, key_value in feature_pairs:
+                stat = self.adaptation_feature_stats[key_type].setdefault(
+                    key_value,
+                    build_feature_stat(key_type, key_value),
+                )
+                add_vote_counts(stat, totals["up"], totals["down"])
+
+        return by_suggestion
+
+    def _build_training_rows(self) -> list[dict[str, Any]]:
+        feedback_by_suggestion = self._rebuild_adaptation_feature_stats()
+        rows: list[dict[str, Any]] = []
+        for suggestion_id, feedback in feedback_by_suggestion.items():
+            suggestion = self.suggestions.get(suggestion_id)
+            if not suggestion:
+                continue
+            snapshot = self._ensure_feature_snapshot(suggestion)
+            priors = build_training_priors(snapshot, self.adaptation_feature_stats)
+            rows.append(
+                {
+                    "suggestionId": suggestion_id,
+                    "features": encode_training_features(snapshot, priors),
+                    "target": float(feedback["smoothedUtility"]),
+                    "sampleWeight": int(feedback["voteCount"]),
+                }
+            )
+        return rows
+
+    def retrain_adaptation_model(self) -> dict[str, Any]:
+        rows = self._build_training_rows()
+        trained_model = train_reward_model(rows)
+        current_version = self.active_adaptation_model_version
+        if trained_model["version"] != current_version:
+            self.adaptation_model_versions[current_version]["status"] = "INACTIVE"
+            self.adaptation_model_versions[trained_model["version"]] = trained_model
+            self.active_adaptation_model_version = trained_model["version"]
+        else:
+            self.adaptation_model_versions[current_version] = trained_model
+        return self.get_adaptation_status()
+
+    def get_adaptation_status(self) -> dict[str, Any]:
+        feedback_by_suggestion = self._rebuild_adaptation_feature_stats()
+        active_model = self._active_adaptation_model()
+        return {
+            "currentVersion": active_model["version"],
+            "trainedAt": active_model["trainedAt"],
+            "trainingExamples": active_model["trainingExamples"],
+            "health": "ready" if active_model["trainingExamples"] > 0 else "cold",
+            "snapshots": len(self.suggestion_feature_snapshots),
+            "feedbackSuggestions": len(feedback_by_suggestion),
+            "featureStats": {
+                stat_type: len(self.adaptation_feature_stats.get(stat_type, {}))
+                for stat_type in FEATURE_STAT_TYPES
+            },
+            "metrics": active_model.get("metrics", {}),
+        }
+
+    def _adapted_suggestions(self, suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return rerank_suggestions(
+            suggestions,
+            self.suggestion_feature_snapshots,
+            self.adaptation_feature_stats,
+            self._active_adaptation_model(),
+        )
 
     def upsert_github_installation(self, installation_id: int, account_login: str) -> dict[str, Any]:
         existing = next(
@@ -483,6 +623,7 @@ class InMemoryStore:
             }
             self.suggestions[suggestion["id"]] = suggestion
             self.suggestions_by_job.setdefault(job["id"], []).append(suggestion["id"])
+            self._store_feature_snapshot(suggestion)
             created_count += 1
 
         return created_count
@@ -676,25 +817,11 @@ class InMemoryStore:
         items.sort(key=lambda item: item["createdAt"])
         return paginate(items, cursor, limit)
 
-    def feedback_score_by_fingerprint(self) -> dict[str, int]:
-        scores: dict[str, int] = {}
-        for comment in self.comments.values():
-            suggestion = self.suggestions.get(comment["suggestionId"])
-            if not suggestion:
-                continue
-
-            vote_ids = self.feedback_by_comment.get(comment["id"], [])
-            votes = [self.feedback_votes[vote_id] for vote_id in vote_ids if vote_id in self.feedback_votes]
-            score = sum(1 if vote["vote"] == "up" else -1 for vote in votes)
-            scores[suggestion["fingerprint"]] = scores.get(suggestion["fingerprint"], 0) + score
-
-        return scores
-
     def list_job_suggestions(self, job_id: str, cursor: Any, limit: Any) -> dict[str, Any]:
         self.get_job(job_id)
         ids = self.suggestions_by_job.get(job_id, [])
         items = [self.suggestions[item_id] for item_id in ids if item_id in self.suggestions]
-        ranked = rerank_suggestions(items, self.feedback_score_by_fingerprint())
+        ranked = self._adapted_suggestions(items)
         return paginate(ranked, cursor, limit)
 
     def publish(self, pr_id: str, job_id: str, mode: str, dry_run: bool) -> dict[str, Any]:
@@ -715,11 +842,10 @@ class InMemoryStore:
             }
 
         suggestion_ids = self.suggestions_by_job.get(job["id"], [])
-        suggestions = [
-            self.suggestions[item_id]
-            for item_id in suggestion_ids
-            if item_id in self.suggestions and self.suggestions[item_id].get("deliveryMode", "inline") == "inline"
-        ]
+        adapted = self._adapted_suggestions(
+            [self.suggestions[item_id] for item_id in suggestion_ids if item_id in self.suggestions]
+        )
+        suggestions = [item for item in adapted if item.get("deliveryMode", "inline") == "inline"]
 
         run = {
             "id": f"pubrun_{uuid4()}",
@@ -833,6 +959,7 @@ class InMemoryStore:
             existing["vote"] = vote
             existing["reason"] = reason
             existing["updatedAt"] = now
+            self._rebuild_adaptation_feature_stats()
             return existing
 
         feedback = {
@@ -846,6 +973,7 @@ class InMemoryStore:
         }
         self.feedback_votes[feedback["id"]] = feedback
         self.feedback_by_comment.setdefault(comment_id, []).append(feedback["id"])
+        self._rebuild_adaptation_feature_stats()
         return feedback
 
     def get_comment_feedback(self, comment_id: str) -> dict[str, Any]:

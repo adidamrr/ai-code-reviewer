@@ -848,6 +848,14 @@ def create_app(config: AppConfig) -> FastAPI:
     async def get_feedback_summary(pr_id: str) -> dict[str, Any]:
         return store.get_pr_feedback_summary(pr_id)
 
+    @app.get("/adaptation/status")
+    async def get_adaptation_status() -> dict[str, Any]:
+        return store.get_adaptation_status()
+
+    @app.post("/adaptation/retrain")
+    async def retrain_adaptation() -> dict[str, Any]:
+        return store.retrain_adaptation_model()
+
     frontend_dist = config.frontend_dist_path
     index_file = (frontend_dist / "index.html") if frontend_dist else None
 
