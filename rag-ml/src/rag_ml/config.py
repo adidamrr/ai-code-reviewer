@@ -32,7 +32,10 @@ class RagConfig:
     rag_root: Path
     kb_root: Path
     build_root: Path
+    model_provider: str
     ollama_base_url: str
+    model_api_base_url: str | None
+    model_api_key: str | None
     generation_model: str
     eval_generation_model: str
     embed_model: str
@@ -61,10 +64,13 @@ def load_config() -> RagConfig:
     generation_model = os.getenv("RAG_GENERATION_MODEL", "qwen2.5-coder:7b")
     _CONFIG = RagConfig(
         repo_root=REPO_ROOT,
+        model_provider=(os.getenv("RAG_MODEL_PROVIDER") or "ollama").strip() or "ollama",
         rag_root=RAG_ROOT,
         kb_root=Path(os.getenv("RAG_KB_DIR", str(KB_ROOT))).resolve(),
         build_root=Path(os.getenv("RAG_BUILD_DIR", str(BUILD_ROOT))).resolve(),
         ollama_base_url=(os.getenv("RAG_OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/"),
+        model_api_base_url=((os.getenv("RAG_API_BASE_URL") or "").strip().rstrip("/") or None),
+        model_api_key=((os.getenv("RAG_API_KEY") or "").strip() or None),
         generation_model=generation_model,
         eval_generation_model=os.getenv("RAG_EVAL_GENERATION_MODEL", "qwen2.5-coder:14b"),
         embed_model=os.getenv("RAG_EMBED_MODEL", "nomic-embed-text"),

@@ -22,7 +22,7 @@ from .kb_chunker import chunk_documents
 from .kb_inventory import build_inventory, write_inventory
 from .kb_loader import collect_document_descriptors
 from .kb_normalizer import normalize_descriptor
-from .ollama_client import OllamaClient, OllamaError
+from .model_client import ModelClientError, create_model_client
 from .query_builder import build_query
 from .ranking import build_ranked_suggestion, dedupe_and_rank, fingerprint_for_suggestion
 from .schemas import (
@@ -187,7 +187,7 @@ class RagRuntime:
                 self.sparse_by_namespace[namespace] = load_sparse_index(sparse_path)
             if dense_path.exists() and dense_meta.exists():
                 self.dense_by_namespace[namespace] = load_dense_index(dense_path, dense_meta)
-        self.client = OllamaClient(config)
+        self.client = create_model_client(config)
         self.retriever = HybridRetriever(chunks_by_id, self.sparse_by_namespace, self.dense_by_namespace)
         self.generator = SuggestionGenerator(self.client)
         self.citation_resolver = CitationResolver(chunks_by_id)
@@ -229,7 +229,7 @@ async def build_artifacts(config: RagConfig, namespaces: set[str] | None = None)
     for descriptor in descriptors:
         grouped[descriptor.namespace].append(descriptor)
 
-    client = OllamaClient(config)
+    client = create_model_client(config)
     await client.ensure_models_available([config.embed_model])
     for namespace_item in inventory:
         if namespaces and namespace_item.namespace not in namespaces:
@@ -287,9 +287,11 @@ async def runtime_status() -> dict[str, Any]:
         "enabled": True,
         "ready": False,
         "buildRoot": str(config.build_root),
+        "modelProvider": config.model_provider,
         "embeddingModel": config.embed_model,
         "generationModel": config.generation_model,
         "repairModel": config.repair_model,
+        "modelApiBaseUrl": config.model_api_base_url,
         "requiredNamespaces": required_namespaces,
         "builtNamespaces": [],
         "missingArtifacts": [],
@@ -320,13 +322,13 @@ async def runtime_status() -> dict[str, Any]:
             missing_artifacts.append(namespace)
     status["missingArtifacts"] = missing_artifacts
 
-    client = OllamaClient(config)
+    client = create_model_client(config)
     try:
         required_models = [config.embed_model, config.generation_model]
         if config.repair_model and config.repair_model not in required_models:
             required_models.append(config.repair_model)
         await client.ensure_models_available(required_models)
-    except OllamaError as error:
+    except ModelClientError as error:
         status["message"] = str(error)
         return status
 
