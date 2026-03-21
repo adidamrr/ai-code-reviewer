@@ -8,7 +8,8 @@
 - `scripts/` — inventory, build и evaluation.
 - `build/` — локальные артефакты индексации (в git не коммитятся).
 
-## Обязательные модели
+## Провайдер моделей
+По умолчанию runtime использует локальный `Ollama`:
 ```bash
 ollama pull qwen2.5-coder:7b
 ollama pull nomic-embed-text
@@ -18,6 +19,45 @@ ollama pull nomic-embed-text
 ```bash
 cd backend
 npm run rag:pull-models
+```
+
+Можно переключить runtime на удалённый OpenAI-compatible API:
+```bash
+export RAG_MODEL_PROVIDER=api
+export RAG_API_BASE_URL=https://your-provider.example/v1
+export RAG_API_KEY=your_api_key
+export RAG_GENERATION_MODEL=gpt-4.1-mini
+export RAG_EMBED_MODEL=text-embedding-3-small
+```
+
+В этом режиме и генерация, и embeddings берутся из внешнего API.
+
+
+## Docker Compose
+
+### Ollama mode
+```bash
+docker compose -f docker-compose.ollama.yml up --build -d
+```
+
+### API mode (without Ollama)
+```bash
+docker compose -f docker-compose.api.yml up --build -d
+```
+
+В API-режиме compose не поднимает `ollama`, а bootstrap использует внешний API для embeddings/generation и сборки артефактов.
+
+Пример для Gemini OpenAI-compat:
+```env
+RAG_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+RAG_API_KEY=ваш_GEMINI_API_KEY
+RAG_API_GENERATION_MODEL=gemini-3-flash-preview
+RAG_API_EMBED_MODEL=gemini-embedding-2-preview
+```
+
+Для диагностики bootstrap в compose:
+```bash
+docker compose -f docker-compose.api.yml logs --tail=200 rag-bootstrap
 ```
 
 ## Сборка KB

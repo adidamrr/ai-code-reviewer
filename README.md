@@ -4,10 +4,32 @@ This repo for AI in engineering education.
 ## Quick Start
 
 ### Docker
+
+#### Вариант 1: локальный Ollama
 ```bash
-docker compose up --build -d
-docker compose exec ollama ollama pull nomic-embed-text
-docker compose exec ollama ollama pull qwen2.5-coder:7b
+docker compose -f docker-compose.ollama.yml up --build -d
+```
+
+Этот compose поднимает `ollama`, автоматически скачивает модели и собирает RAG-индексы.
+
+#### Вариант 2: внешний API без Ollama
+```bash
+docker compose -f docker-compose.api.yml up --build -d
+```
+
+Этот compose **не поднимает Ollama** и использует только внешний API из `.env` (`RAG_API_BASE_URL`, `RAG_API_KEY`).
+
+Для Gemini вставляйте значения так:
+```env
+RAG_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+RAG_API_KEY=ваш_GEMINI_API_KEY
+RAG_API_GENERATION_MODEL=gemini-3-flash-preview
+RAG_API_EMBED_MODEL=gemini-embedding-2-preview
+```
+
+Если `rag-bootstrap` завершился с ошибкой, посмотрите логи:
+```bash
+docker compose -f docker-compose.api.yml logs --tail=200 rag-bootstrap
 ```
 
 Open:
@@ -41,6 +63,15 @@ Optional local Ollama:
 ```bash
 ollama pull nomic-embed-text
 ollama pull qwen2.5-coder:7b
+```
+
+Alternative: remote model API (OpenAI-compatible) instead of local Ollama:
+```bash
+export RAG_MODEL_PROVIDER=api
+export RAG_API_BASE_URL=https://your-provider.example/v1
+export RAG_API_KEY=your_api_key
+export RAG_GENERATION_MODEL=gpt-4.1-mini
+export RAG_EMBED_MODEL=text-embedding-3-small
 ```
 
 Useful checks:

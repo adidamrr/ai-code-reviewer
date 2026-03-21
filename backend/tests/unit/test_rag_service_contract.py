@@ -190,7 +190,10 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
             rag_root=REPO_ROOT / "rag-ml",
             kb_root=REPO_ROOT / "rag-ml" / "kb",
             build_root=REPO_ROOT / "rag-ml" / "build",
+            model_provider="ollama",
             ollama_base_url="http://127.0.0.1:11434",
+            model_api_base_url=None,
+            model_api_key=None,
             generation_model="qwen2.5-coder:7b",
             eval_generation_model="qwen2.5-coder:14b",
             embed_model="nomic-embed-text",
@@ -267,7 +270,10 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
                 rag_root=REPO_ROOT / "rag-ml",
                 kb_root=REPO_ROOT / "rag-ml" / "kb",
                 build_root=build_root,
+                model_provider="ollama",
                 ollama_base_url="http://127.0.0.1:11434",
+                model_api_base_url=None,
+                model_api_key=None,
                 generation_model="qwen2.5-coder:7b",
                 eval_generation_model="qwen2.5-coder:14b",
                 embed_model="nomic-embed-text",
@@ -284,7 +290,7 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
                 ollama_timeout_seconds=30.0,
             )
 
-            with patch("rag_ml.service.load_config", return_value=config), patch("rag_ml.service.OllamaClient", return_value=_FakeClient()):
+            with patch("rag_ml.service.load_config", return_value=config), patch("rag_ml.service.create_model_client", return_value=_FakeClient()):
                 result = await runtime_status()
 
         self.assertFalse(result["ready"])
