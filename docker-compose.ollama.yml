@@ -42,7 +42,9 @@ services:
       RAG_OLLAMA_TIMEOUT_SECONDS: ${RAG_OLLAMA_TIMEOUT_SECONDS:-120}
       RAG_BOOTSTRAP_TIMEOUT_SECONDS: ${RAG_BOOTSTRAP_TIMEOUT_SECONDS:-900}
       RAG_SKIP_BOOTSTRAP: ${RAG_SKIP_BOOTSTRAP:-false}
-    command: ["python", "scripts/bootstrap_rag.py"]
+
+    command: ["python", "scripts/bootstrap_stack.py"]
+
     restart: "no"
     volumes:
       - rag_build:/rag-ml/build
