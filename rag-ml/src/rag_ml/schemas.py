@@ -115,6 +115,7 @@ class BuildNamespaceMeta(Model):
 class BuildManifest(Model):
     generatedAt: str
     embeddingModel: str
+    denseRetrievalEnabled: bool = True
     namespaces: list[BuildNamespaceMeta]
 
 

@@ -1,0 +1,77 @@
+services:
+  rag-bootstrap:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment: &backend_env
+      PORT: 4000
+      API_SERVICE_TOKEN: ${API_SERVICE_TOKEN:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      RAG_ENABLED: ${RAG_ENABLED:-true}
+      RAG_MODEL_PROVIDER: api
+      RAG_OLLAMA_BASE_URL: ${RAG_OLLAMA_BASE_URL:-http://ollama:11434}
+      RAG_API_BASE_URL: ${RAG_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+      RAG_API_KEY: ${RAG_API_KEY:-}
+      RAG_GENERATION_MODEL: ${RAG_API_GENERATION_MODEL:-gemini-3-flash-preview}
+      RAG_EVAL_GENERATION_MODEL: ${RAG_API_EVAL_GENERATION_MODEL:-gemini-3-flash-preview}
+      RAG_EMBED_MODEL: ${RAG_API_EMBED_MODEL:-gemini-embedding-2-preview}
+      RAG_ENABLE_DENSE: ${RAG_ENABLE_DENSE:-true}
+      RAG_REPAIR_MODEL: ${RAG_REPAIR_MODEL:-}
+      RAG_BUILD_DIR: /rag-ml/build
+      RAG_KB_DIR: /rag-ml/kb
+      RAG_SUPPORTED_LANGUAGES: ${RAG_SUPPORTED_LANGUAGES:-python,dart,swift,cpp,javascript}
+      RAG_ENABLE_SECURITY: ${RAG_ENABLE_SECURITY:-false}
+      RAG_ENABLE_PERFORMANCE: ${RAG_ENABLE_PERFORMANCE:-true}
+      RAG_DEFAULT_TOPK: ${RAG_DEFAULT_TOPK:-6}
+      RAG_MAX_HUNKS_PER_FILE: ${RAG_MAX_HUNKS_PER_FILE:-3}
+      RAG_MAX_HOTSPOT_TASKS: ${RAG_MAX_HOTSPOT_TASKS:-8}
+      RAG_EMBED_BATCH_SIZE: ${RAG_EMBED_BATCH_SIZE:-64}
+      RAG_GENERATION_MAX_TOKENS: ${RAG_GENERATION_MAX_TOKENS:-256}
+      RAG_OLLAMA_TIMEOUT_SECONDS: ${RAG_OLLAMA_TIMEOUT_SECONDS:-120}
+      RAG_BOOTSTRAP_TIMEOUT_SECONDS: ${RAG_BOOTSTRAP_TIMEOUT_SECONDS:-900}
+      RAG_SKIP_BOOTSTRAP: ${RAG_SKIP_BOOTSTRAP:-false}
+    command: ["python", "scripts/bootstrap_stack.py"]
+    restart: "no"
+    volumes:
+      - rag_build:/rag-ml/build
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      <<: *backend_env
+    ports:
+      - "${BACKEND_PORT:-4000}:4000"
+    depends_on:
+      rag-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - rag_build:/rag-ml/build
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/healthz', timeout=5).read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_BACKEND_BASE_URL: ${FRONTEND_VITE_BACKEND_BASE_URL:-http://localhost:4000}
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  rag_build:

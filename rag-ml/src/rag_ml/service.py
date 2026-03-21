@@ -22,7 +22,7 @@ from .kb_chunker import chunk_documents
 from .kb_inventory import build_inventory, write_inventory
 from .kb_loader import collect_document_descriptors
 from .kb_normalizer import normalize_descriptor
-from .ollama_client import OllamaClient, OllamaError
+from .model_client import ModelClientError, create_model_client
 from .query_builder import build_query
 from .ranking import build_ranked_suggestion, dedupe_and_rank, fingerprint_for_suggestion
 from .schemas import (
@@ -89,6 +89,11 @@ def _remove_if_exists(path: Path) -> None:
 def _clear_namespace_artifacts(config: RagConfig, namespace: str) -> None:
     _remove_if_exists(_chunk_path(config, namespace))
     _remove_if_exists(_sparse_path(config, namespace))
+    _remove_if_exists(_dense_vector_path(config, namespace))
+    _remove_if_exists(_dense_meta_path(config, namespace))
+
+
+def _clear_dense_artifacts(config: RagConfig, namespace: str) -> None:
     _remove_if_exists(_dense_vector_path(config, namespace))
     _remove_if_exists(_dense_meta_path(config, namespace))
 
@@ -187,7 +192,7 @@ class RagRuntime:
                 self.sparse_by_namespace[namespace] = load_sparse_index(sparse_path)
             if dense_path.exists() and dense_meta.exists():
                 self.dense_by_namespace[namespace] = load_dense_index(dense_path, dense_meta)
-        self.client = OllamaClient(config)
+        self.client = create_model_client(config)
         self.retriever = HybridRetriever(chunks_by_id, self.sparse_by_namespace, self.dense_by_namespace)
         self.generator = SuggestionGenerator(self.client)
         self.citation_resolver = CitationResolver(chunks_by_id)
@@ -195,7 +200,11 @@ class RagRuntime:
         self.verifier = FindingVerifier()
 
     def has_namespace(self, namespace: str) -> bool:
-        return namespace in self.sparse_by_namespace and namespace in self.dense_by_namespace
+        if namespace not in self.sparse_by_namespace:
+            return False
+        if self.config.enable_dense_retrieval:
+            return namespace in self.dense_by_namespace
+        return True
 
 
 _RUNTIME: RagRuntime | None = None
@@ -229,8 +238,12 @@ async def build_artifacts(config: RagConfig, namespaces: set[str] | None = None)
     for descriptor in descriptors:
         grouped[descriptor.namespace].append(descriptor)
 
-    client = OllamaClient(config)
-    await client.ensure_models_available([config.embed_model])
+    client = create_model_client(config)
+    required_models: list[str] = []
+    if config.enable_dense_retrieval:
+        required_models.append(config.embed_model)
+    if required_models:
+        await client.ensure_models_available(required_models)
     for namespace_item in inventory:
         if namespaces and namespace_item.namespace not in namespaces:
             continue
@@ -245,12 +258,15 @@ async def build_artifacts(config: RagConfig, namespaces: set[str] | None = None)
             chunk_path = _chunk_path(config, namespace_item.namespace)
             write_chunks(chunk_path, chunks)
             build_sparse_index(chunks, _sparse_path(config, namespace_item.namespace))
-            await build_dense_index(
-                chunks,
-                _dense_vector_path(config, namespace_item.namespace),
-                _dense_meta_path(config, namespace_item.namespace),
-                client,
-            )
+            if config.enable_dense_retrieval:
+                await build_dense_index(
+                    chunks,
+                    _dense_vector_path(config, namespace_item.namespace),
+                    _dense_meta_path(config, namespace_item.namespace),
+                    client,
+                )
+            else:
+                _clear_dense_artifacts(config, namespace_item.namespace)
         else:
             _clear_namespace_artifacts(config, namespace_item.namespace)
         merged_meta[namespace_item.namespace] = (
@@ -267,6 +283,7 @@ async def build_artifacts(config: RagConfig, namespaces: set[str] | None = None)
     manifest = BuildManifest(
         generatedAt=now_iso(),
         embeddingModel=config.embed_model,
+        denseRetrievalEnabled=config.enable_dense_retrieval,
         namespaces=sorted(merged_meta.values(), key=lambda item: item.namespace),
     )
     config.build_root.mkdir(parents=True, exist_ok=True)
@@ -287,9 +304,12 @@ async def runtime_status() -> dict[str, Any]:
         "enabled": True,
         "ready": False,
         "buildRoot": str(config.build_root),
+        "modelProvider": config.model_provider,
         "embeddingModel": config.embed_model,
+        "denseRetrievalEnabled": config.enable_dense_retrieval,
         "generationModel": config.generation_model,
         "repairModel": config.repair_model,
+        "modelApiBaseUrl": config.model_api_base_url,
         "requiredNamespaces": required_namespaces,
         "builtNamespaces": [],
         "missingArtifacts": [],
@@ -310,23 +330,28 @@ async def runtime_status() -> dict[str, Any]:
         if meta is None or not meta.ready:
             missing_artifacts.append(namespace)
             continue
-        required_paths = (
+        required_paths = [
             _chunk_path(config, namespace),
             _sparse_path(config, namespace),
-            _dense_vector_path(config, namespace),
-            _dense_meta_path(config, namespace),
-        )
+        ]
+        if config.enable_dense_retrieval:
+            required_paths.extend((
+                _dense_vector_path(config, namespace),
+                _dense_meta_path(config, namespace),
+            ))
         if any(not path.exists() for path in required_paths):
             missing_artifacts.append(namespace)
     status["missingArtifacts"] = missing_artifacts
 
-    client = OllamaClient(config)
+    client = create_model_client(config)
     try:
-        required_models = [config.embed_model, config.generation_model]
+        required_models = [config.generation_model]
+        if config.enable_dense_retrieval:
+            required_models.insert(0, config.embed_model)
         if config.repair_model and config.repair_model not in required_models:
             required_models.append(config.repair_model)
         await client.ensure_models_available(required_models)
-    except OllamaError as error:
+    except ModelClientError as error:
         status["message"] = str(error)
         return status
 
@@ -350,7 +375,9 @@ async def analyze_request(
     config = load_config()
     request = RagRequest.model_validate(raw_request)
     runtime = _load_runtime(config)
-    required_models = [config.embed_model, config.generation_model]
+    required_models = [config.generation_model]
+    if config.enable_dense_retrieval:
+        required_models.insert(0, config.embed_model)
     if config.repair_model and config.repair_model not in required_models:
         required_models.append(config.repair_model)
     await runtime.client.ensure_models_available(required_models)
@@ -584,7 +611,9 @@ async def analyze_request(
                 if category == "security" and config.enable_security and runtime.has_namespace("security-pack"):
                     namespaces.append("security-pack")
                 query_text = build_query(task, category)
-                query_vector = np.asarray((await runtime.client.embed_texts([query_text]))[0], dtype=np.float32)
+                query_vector = None
+                if config.enable_dense_retrieval:
+                    query_vector = np.asarray((await runtime.client.embed_texts([query_text]))[0], dtype=np.float32)
                 hits = runtime.retriever.search(namespaces, query_text, query_vector, top_k=config.default_topk)
                 if hits:
                     hits_by_category[category] = hits
