@@ -5,7 +5,6 @@ import os
 import subprocess
 import sys
 import time
-import traceback
 from pathlib import Path
 from urllib.error import URLError, HTTPError
 from urllib.request import Request, urlopen
@@ -73,27 +72,7 @@ def ensure_ollama_models(base_url: str, models: list[str]) -> None:
         post_json(f"{base_url}/api/pull", {"name": model, "stream": False})
 
 
-def validate_api_mode(base_url: str | None, api_key: str | None, generation_model: str, embed_model: str, dense_enabled: bool) -> None:
-
-    missing: list[str] = []
-    if not (base_url or '').strip():
-        missing.append('RAG_API_BASE_URL')
-    if not (api_key or '').strip():
-        missing.append('RAG_API_KEY')
-    if missing:
-        raise RuntimeError(
-            'API bootstrap is missing required configuration: ' + ', '.join(missing)
-        )
-    masked_key = (api_key or '')[:6] + '...' if api_key else '<missing>'
-    print(
-        f"[bootstrap] API mode enabled: base_url={base_url} generation_model={generation_model} embed_model={embed_model} dense_enabled={dense_enabled} api_key={masked_key}",
-
-        flush=True,
-    )
-
-
-def build_missing_artifacts(build_root: Path, generation_model: str, dense_enabled: bool, inventory_cmd: list[str], build_cmd: list[str]) -> None:
-
+def build_missing_artifacts(build_root: Path, generation_model: str, inventory_cmd: list[str], build_cmd: list[str]) -> None:
     manifest_path = build_root / "build-manifest.json"
     if manifest_path.exists():
         try:
@@ -101,15 +80,8 @@ def build_missing_artifacts(build_root: Path, generation_model: str, dense_enabl
         except (OSError, json.JSONDecodeError):
             manifest = None
         if isinstance(manifest, dict) and manifest.get("embeddingModel"):
-            manifest_dense_enabled = manifest.get("denseRetrievalEnabled", True)
-            if manifest_dense_enabled == dense_enabled:
-                print(f"[bootstrap] Reusing existing RAG artifacts from {build_root}", flush=True)
-                return
-            print(
-                f"[bootstrap] Rebuilding RAG artifacts because denseRetrievalEnabled changed: manifest={manifest_dense_enabled} env={dense_enabled}",
-                flush=True,
-            )
-
+            print(f"[bootstrap] Reusing existing RAG artifacts from {build_root}", flush=True)
+            return
 
     print("[bootstrap] Building RAG inventory", flush=True)
     subprocess.run(inventory_cmd, check=True)
@@ -127,31 +99,18 @@ def main() -> int:
     generation_model = (os.getenv("RAG_GENERATION_MODEL") or "qwen2.5-coder:7b").strip()
     repair_model = (os.getenv("RAG_REPAIR_MODEL") or generation_model).strip()
     embed_model = (os.getenv("RAG_EMBED_MODEL") or "nomic-embed-text").strip()
-    api_base_url = (os.getenv("RAG_API_BASE_URL") or "").strip()
-    api_key = (os.getenv("RAG_API_KEY") or "").strip()
     build_root = Path(os.getenv("RAG_BUILD_DIR") or "/rag-ml/build")
-    dense_enabled = parse_bool(os.getenv("RAG_ENABLE_DENSE"), default=True)
-
     timeout_seconds = int(os.getenv("RAG_BOOTSTRAP_TIMEOUT_SECONDS", "900"))
-
-    print(f"[bootstrap] Starting bootstrap with provider={provider}", flush=True)
 
     if provider == "ollama":
         wait_for_ollama(ollama_base_url, timeout_seconds)
-        required_models = [generation_model, repair_model]
-        if dense_enabled:
-            required_models.insert(0, embed_model)
-        ensure_ollama_models(ollama_base_url, required_models)
+        ensure_ollama_models(ollama_base_url, [embed_model, generation_model, repair_model])
     else:
-        validate_api_mode(api_base_url, api_key, generation_model, embed_model, dense_enabled)
-
         print(f"[bootstrap] Skipping Ollama bootstrap because RAG_MODEL_PROVIDER={provider}", flush=True)
 
     build_missing_artifacts(
         build_root,
         generation_model,
-        dense_enabled,
-
         [sys.executable, "../rag-ml/scripts/inventory.py"],
         [sys.executable, "../rag-ml/scripts/build_indexes.py"],
     )
@@ -160,9 +119,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as error:
-        print(f"[bootstrap] Fatal error: {error}", flush=True)
-        traceback.print_exc()
-        raise
+    raise SystemExit(main())
