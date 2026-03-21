@@ -39,6 +39,7 @@ class RagConfig:
     generation_model: str
     eval_generation_model: str
     embed_model: str
+    enable_dense_retrieval: bool
     supported_languages: tuple[str, ...]
     primary_languages: tuple[str, ...]
     experimental_languages: tuple[str, ...]
@@ -74,6 +75,7 @@ def load_config() -> RagConfig:
         generation_model=generation_model,
         eval_generation_model=os.getenv("RAG_EVAL_GENERATION_MODEL", "qwen2.5-coder:14b"),
         embed_model=os.getenv("RAG_EMBED_MODEL", "nomic-embed-text"),
+        enable_dense_retrieval=parse_bool(os.getenv("RAG_ENABLE_DENSE"), default=True),
         supported_languages=parse_list(os.getenv("RAG_SUPPORTED_LANGUAGES"), default=SUPPORTED_LANGUAGES),
         primary_languages=PRIMARY_LANGUAGES,
         experimental_languages=EXPERIMENTAL_LANGUAGES,

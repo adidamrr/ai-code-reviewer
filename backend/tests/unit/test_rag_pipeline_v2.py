@@ -249,6 +249,7 @@ class RagPipelineV2Tests(unittest.IsolatedAsyncioTestCase):
             generation_model="qwen2.5-coder:7b",
             eval_generation_model="qwen2.5-coder:14b",
             embed_model="nomic-embed-text",
+            enable_dense_retrieval=True,
             supported_languages=("dart",),
             primary_languages=("dart",),
             experimental_languages=(),

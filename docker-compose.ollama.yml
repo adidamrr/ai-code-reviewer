@@ -28,6 +28,8 @@ services:
       RAG_GENERATION_MODEL: ${RAG_GENERATION_MODEL:-qwen2.5-coder:7b}
       RAG_EVAL_GENERATION_MODEL: ${RAG_EVAL_GENERATION_MODEL:-qwen2.5-coder:14b}
       RAG_EMBED_MODEL: ${RAG_EMBED_MODEL:-nomic-embed-text}
+      RAG_ENABLE_DENSE: ${RAG_ENABLE_DENSE:-true}
+
       RAG_REPAIR_MODEL: ${RAG_REPAIR_MODEL:-}
       RAG_BUILD_DIR: /rag-ml/build
       RAG_KB_DIR: /rag-ml/kb
@@ -42,7 +44,6 @@ services:
       RAG_OLLAMA_TIMEOUT_SECONDS: ${RAG_OLLAMA_TIMEOUT_SECONDS:-120}
       RAG_BOOTSTRAP_TIMEOUT_SECONDS: ${RAG_BOOTSTRAP_TIMEOUT_SECONDS:-900}
       RAG_SKIP_BOOTSTRAP: ${RAG_SKIP_BOOTSTRAP:-false}
-
     command: ["python", "scripts/bootstrap_stack.py"]
 
     restart: "no"
