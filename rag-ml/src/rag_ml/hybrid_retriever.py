@@ -35,7 +35,7 @@ class HybridRetriever:
         self,
         namespaces: list[str],
         query_text: str,
-        query_vector: np.ndarray,
+        query_vector: np.ndarray | None,
         *,
         sparse_k: int = 12,
         dense_k: int = 12,
@@ -53,7 +53,7 @@ class HybridRetriever:
                     sparse_rank_by_chunk.setdefault(chunk_id, rank)
 
             dense_index = self.dense_by_namespace.get(namespace)
-            if dense_index:
+            if dense_index and query_vector is not None:
                 for chunk_id, _score, rank in dense_index.search(query_vector, dense_k):
                     score_by_chunk[chunk_id] += 1.0 / (RRF_K + rank)
                     dense_rank_by_chunk.setdefault(chunk_id, rank)

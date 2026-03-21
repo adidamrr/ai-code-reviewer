@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 
-from .ollama_client import OllamaClient, OllamaError
+from .model_client import ModelClientError, ModelClientProtocol
 from .schemas import OllamaMessage, PROverview, PROverviewHotspot, RagRequest
 
 
@@ -39,7 +39,7 @@ def _heuristic_overview(request: RagRequest) -> PROverview:
     )
 
 
-async def build_pr_overview(client: OllamaClient, request: RagRequest) -> PROverview:
+async def build_pr_overview(client: ModelClientProtocol, request: RagRequest) -> PROverview:
     heuristic = _heuristic_overview(request)
     summary_payload = {
         "title": request.title or "Untitled PR",
@@ -76,5 +76,5 @@ async def build_pr_overview(client: OllamaClient, request: RagRequest) -> PROver
         if not overview.recommendedScopes:
             overview = overview.model_copy(update={"recommendedScopes": heuristic.recommendedScopes})
         return overview
-    except (OllamaError, ValueError):
+    except (ModelClientError, ValueError):
         return heuristic

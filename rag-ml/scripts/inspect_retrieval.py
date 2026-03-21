@@ -30,7 +30,9 @@ async def main() -> None:
     language_slug = to_slug(args.language) or args.language.lower()
     namespaces = [language_slug]
     query_text = f"language={language_slug}\ncategory={args.category}\ncode={args.query}"
-    vector = np.asarray((await runtime.client.embed_texts([query_text]))[0], dtype=np.float32)
+    vector = None
+    if config.enable_dense_retrieval:
+        vector = np.asarray((await runtime.client.embed_texts([query_text]))[0], dtype=np.float32)
     hits = runtime.retriever.search(namespaces, query_text, vector, top_k=config.default_topk)
     print(json.dumps([hit.model_dump() for hit in hits], indent=2, ensure_ascii=True))
 

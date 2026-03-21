@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .ollama_client import OllamaClient
+from .model_client import ModelClientProtocol
 from .schemas import KnowledgeChunk
 
 
@@ -38,7 +38,7 @@ class DenseIndex:
         return results
 
 
-async def build_dense_index(chunks: list[KnowledgeChunk], output_vectors: Path, output_meta: Path, client: OllamaClient) -> None:
+async def build_dense_index(chunks: list[KnowledgeChunk], output_vectors: Path, output_meta: Path, client: ModelClientProtocol) -> None:
     output_vectors.parent.mkdir(parents=True, exist_ok=True)
     output_meta.parent.mkdir(parents=True, exist_ok=True)
     batch_size = max(1, getattr(client, "embed_batch_size", 64))

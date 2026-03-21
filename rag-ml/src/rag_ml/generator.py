@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .ollama_client import OllamaClient, OllamaError, OllamaStructuredOutputError
+from .model_client import ModelClientError, ModelClientProtocol, StructuredOutputError
 from .prompt_builder import (
     build_detection_line_messages,
     build_detection_messages,
@@ -39,7 +39,7 @@ CATEGORY_ALIASES = {
 
 
 class SuggestionGenerator:
-    def __init__(self, client: OllamaClient) -> None:
+    def __init__(self, client: ModelClientProtocol) -> None:
         self.client = client
         self.outline_schema = FindingOutlineEnvelope.model_json_schema()
         self.explainer_schema = FindingExplanation.model_json_schema()
@@ -62,7 +62,7 @@ class SuggestionGenerator:
                     task,
                     context_pack,
                 )
-            except OllamaStructuredOutputError as error:
+            except StructuredOutputError as error:
                 last_error = error
                 repaired = await self._repair_invalid_json(
                     task,
@@ -73,7 +73,7 @@ class SuggestionGenerator:
                 )
                 if repaired is not None:
                     return repaired
-            except (OllamaError, ValueError) as error:
+            except (ModelClientError, ValueError) as error:
                 last_error = error
         line_fallback = await self._detect_with_line_format(task, categories, context_pack, max_findings=max_findings)
         if line_fallback is not None:
@@ -99,7 +99,7 @@ class SuggestionGenerator:
             explanation = FindingExplanation.model_validate(payload)
             title = explanation.title.strip() or title
             body = explanation.body.strip() or body
-        except (OllamaError, ValueError):
+        except (ModelClientError, ValueError):
             pass
         return CandidateFinding(
             filePath=outline.filePath,
@@ -140,7 +140,7 @@ class SuggestionGenerator:
                 task,
                 context_pack,
             )
-        except (OllamaError, ValueError):
+        except (ModelClientError, ValueError):
             return None
 
     async def _detect_with_line_format(
@@ -156,7 +156,7 @@ class SuggestionGenerator:
         messages = build_detection_line_messages(task, categories, context_pack, max_findings=max_findings)
         try:
             content = await self.client.chat_text(messages)
-        except OllamaError:
+        except ModelClientError:
             return None
         return self._normalize_envelope(
             self._parse_line_format(content, task),
