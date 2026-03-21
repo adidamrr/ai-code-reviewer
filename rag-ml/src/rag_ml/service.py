@@ -239,11 +239,13 @@ async def build_artifacts(config: RagConfig, namespaces: set[str] | None = None)
         grouped[descriptor.namespace].append(descriptor)
 
     client = create_model_client(config)
+
     required_models: list[str] = []
     if config.enable_dense_retrieval:
         required_models.append(config.embed_model)
     if required_models:
         await client.ensure_models_available(required_models)
+
     for namespace_item in inventory:
         if namespaces and namespace_item.namespace not in namespaces:
             continue

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+
 import os
 import sys
 import unittest
@@ -49,6 +50,7 @@ class _RecordingAsyncClient:
                 }
             ]
         })
+
 
 
 class ModelApiClientTests(unittest.TestCase):
@@ -108,6 +110,7 @@ class ModelApiClientTests(unittest.TestCase):
         request_json = transport.calls[0]["json"]
         self.assertNotIn("extra_body", request_json)
         self.assertEqual(request_json["max_tokens"], config.generation_max_tokens)
+
 
 
 if __name__ == "__main__":

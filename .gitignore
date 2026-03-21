@@ -18,3 +18,4 @@ rag-ml/kb/**/.cache/
 rag-ml/kb/**/index/
 rag-ml/build/
 rag-ml/.venv/
+.env
