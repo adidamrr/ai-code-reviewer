@@ -16,7 +16,8 @@ docker compose -f docker-compose.ollama.yml up --build -d
 docker compose -f docker-compose.api.yml up --build -d
 ```
 
-Этот режим не поднимает `ollama` и использует внешний OpenAI-compatible API.
+Этот режим не поднимает `ollama` и использует внешний OpenAI-compatible API. По умолчанию здесь включён sparse-only режим (`RAG_ENABLE_DENSE=false`), чтобы Gemini/OpenAI-compatible провайдеры без доступных embeddings не падали на bootstrap.
+
 
 ### Gemini example
 
@@ -28,7 +29,11 @@ RAG_API_KEY=ваш_GEMINI_API_KEY
 RAG_API_GENERATION_MODEL=gemini-3-flash-preview
 RAG_API_EVAL_GENERATION_MODEL=gemini-3-flash-preview
 RAG_API_EMBED_MODEL=gemini-embedding-2-preview
+RAG_ENABLE_DENSE=false
 ```
+
+Если ваш провайдер точно поддерживает embeddings, dense retrieval можно вернуть через `RAG_ENABLE_DENSE=true`.
+
 
 ### Если упал bootstrap
 

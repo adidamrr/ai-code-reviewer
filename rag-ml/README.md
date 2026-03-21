@@ -83,4 +83,5 @@ npm run rag:eval
 
 ## Примечание по security
 `security` по умолчанию отключен (`RAG_ENABLE_SECURITY=false`), пока в `kb/shared/security-pack/` не появятся реальные локальные источники, которые можно цитировать.
-`dense` retrieval включен по умолчанию (`RAG_ENABLE_DENSE=true`). Для API-провайдеров, где embeddings недоступны по региону, можно переключиться в sparse-only режим через `RAG_ENABLE_DENSE=false`.
+`dense` retrieval включен по умолчанию (`RAG_ENABLE_DENSE=true`). Для API-провайдеров, где embeddings недоступны по региону, можно переключиться в sparse-only режим через `RAG_ENABLE_DENSE=false`; `docker-compose.api.yml` теперь использует этот режим по умолчанию.
+

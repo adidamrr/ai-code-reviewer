@@ -15,7 +15,7 @@ services:
       RAG_GENERATION_MODEL: ${RAG_API_GENERATION_MODEL:-gemini-3-flash-preview}
       RAG_EVAL_GENERATION_MODEL: ${RAG_API_EVAL_GENERATION_MODEL:-gemini-3-flash-preview}
       RAG_EMBED_MODEL: ${RAG_API_EMBED_MODEL:-gemini-embedding-2-preview}
-      RAG_ENABLE_DENSE: ${RAG_ENABLE_DENSE:-true}
+      RAG_ENABLE_DENSE: ${RAG_ENABLE_DENSE:-false}
 
       RAG_REPAIR_MODEL: ${RAG_REPAIR_MODEL:-}
       RAG_BUILD_DIR: /rag-ml/build

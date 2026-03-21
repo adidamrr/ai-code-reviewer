@@ -293,10 +293,10 @@ class ApiModelClient(ModelClientProtocol):
                     "schema": schema,
                 },
             }
-        extra_body = {
-            "num_ctx": num_ctx,
-        }
-        payload["extra_body"] = extra_body
+        # OpenAI-compatible providers such as Gemini reject Ollama-specific fields
+        # like `num_ctx`, so keep the payload strictly within the chat completions
+        # schema they accept.
+
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
                 f"{self.base_url}/chat/completions",
