@@ -1,6 +1,7 @@
 export type SuggestionScope = "security" | "style" | "bugs" | "performance";
 export type PublishMode = "review_comments" | "issue_comments";
-export type WorkspaceStep = "pr" | "params" | "job" | "results" | "publish" | "feedback" | "history";
+export type WorkspaceStep = "pr" | "job" | "results" | "publish" | "feedback" | "history";
+export type GenerationModelProfile = "yandexgpt-pro" | "yandexgpt-lite" | "qwen3-235b" | "gpt-oss-120b";
 
 export interface GithubSession {
   sessionId: string;
@@ -64,6 +65,8 @@ export interface AnalysisJob {
   snapshotId: string;
   status: "queued" | "running" | "done" | "failed" | "canceled";
   scope: SuggestionScope[];
+  generationModelProfile?: GenerationModelProfile | null;
+  generationModel?: string | null;
   maxComments: number;
   progress: {
     filesDone: number;

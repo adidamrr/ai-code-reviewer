@@ -39,7 +39,7 @@ class _FakeClient:
         self.model_checks.append(list(models))
         return None
 
-    async def embed_texts(self, texts):
+    async def embed_texts(self, texts, *, model=None):
         self.embed_calls += 1
         return [[0.1, 0.2, 0.3] for _ in texts]
 
@@ -200,9 +200,13 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
             ollama_base_url="http://127.0.0.1:11434",
             model_api_base_url=None,
             model_api_key=None,
+            yandex_base_url="https://llm.api.cloud.yandex.net/v1",
+            yandex_folder_id=None,
+            yandex_api_key=None,
             generation_model="qwen2.5-coder:7b",
             eval_generation_model="qwen2.5-coder:14b",
             embed_model="nomic-embed-text",
+            query_embed_model="nomic-embed-text",
             enable_dense_retrieval=True,
             supported_languages=("dart",),
             primary_languages=("dart",),
@@ -215,6 +219,7 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
             embed_batch_size=64,
             generation_max_tokens=256,
             ollama_timeout_seconds=30.0,
+            yandex_disable_data_logging=True,
             repair_model="gemma3:12b",
         )
         request = {
@@ -260,9 +265,13 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
             ollama_base_url="http://127.0.0.1:11434",
             model_api_base_url="https://example.test/v1",
             model_api_key="test-key",
+            yandex_base_url="https://llm.api.cloud.yandex.net/v1",
+            yandex_folder_id=None,
+            yandex_api_key=None,
             generation_model="gemini-3-flash-preview",
             eval_generation_model="gemini-3-flash-preview",
             embed_model="gemini-embedding-2-preview",
+            query_embed_model="gemini-embedding-2-preview",
             enable_dense_retrieval=False,
             supported_languages=("dart",),
             primary_languages=("dart",),
@@ -275,6 +284,7 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
             embed_batch_size=64,
             generation_max_tokens=256,
             ollama_timeout_seconds=30.0,
+            yandex_disable_data_logging=True,
             repair_model="gemini-3-flash-preview",
         )
         request = {
@@ -335,9 +345,13 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
                 ollama_base_url="http://127.0.0.1:11434",
                 model_api_base_url="https://example.test/v1",
                 model_api_key="test-key",
+                yandex_base_url="https://llm.api.cloud.yandex.net/v1",
+                yandex_folder_id=None,
+                yandex_api_key=None,
                 generation_model="gemini-3-flash-preview",
                 eval_generation_model="gemini-3-flash-preview",
                 embed_model="gemini-embedding-2-preview",
+                query_embed_model="gemini-embedding-2-preview",
                 enable_dense_retrieval=False,
                 supported_languages=("dart",),
                 primary_languages=("dart",),
@@ -350,6 +364,7 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
                 embed_batch_size=64,
                 generation_max_tokens=256,
                 ollama_timeout_seconds=30.0,
+                yandex_disable_data_logging=True,
                 repair_model="gemini-3-flash-preview",
             )
             client = _FakeClient()
@@ -395,9 +410,13 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
                 ollama_base_url="http://127.0.0.1:11434",
                 model_api_base_url=None,
                 model_api_key=None,
+                yandex_base_url="https://llm.api.cloud.yandex.net/v1",
+                yandex_folder_id=None,
+                yandex_api_key=None,
                 generation_model="qwen2.5-coder:7b",
                 eval_generation_model="qwen2.5-coder:14b",
                 embed_model="nomic-embed-text",
+                query_embed_model="nomic-embed-text",
                 enable_dense_retrieval=True,
                 supported_languages=("dart", "python"),
                 primary_languages=("dart", "python"),
@@ -410,6 +429,7 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
                 embed_batch_size=64,
                 generation_max_tokens=256,
                 ollama_timeout_seconds=30.0,
+                yandex_disable_data_logging=True,
             )
 
             with patch("rag_ml.service.load_config", return_value=config), patch("rag_ml.service.create_model_client", return_value=_FakeClient()):

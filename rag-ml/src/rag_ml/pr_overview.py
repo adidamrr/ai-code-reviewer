@@ -10,7 +10,7 @@ from .schemas import OllamaMessage, PROverview, PROverviewHotspot, RagRequest
 def _heuristic_overview(request: RagRequest) -> PROverview:
     file_counter = Counter()
     notes: list[str] = []
-    recommended_scopes = [scope for scope in request.scope if scope in {"style", "bugs", "performance", "security"}]
+    recommended_scopes = [scope for scope in request.scope if scope in {"bugs", "performance", "security"}]
     for file in request.files:
         path = file.path.lower()
         if any(token in path for token in ("auth", "token", "session", "login")):
@@ -33,13 +33,18 @@ def _heuristic_overview(request: RagRequest) -> PROverview:
     return PROverview(
         prIntent=(request.title or "Pull request update").strip(),
         riskLevel=risk_level,
-        recommendedScopes=recommended_scopes or ["bugs", "style"],
+        recommendedScopes=recommended_scopes or ["bugs", "security"],
         hotspots=hotspots,
         notes=notes,
     )
 
 
-async def build_pr_overview(client: ModelClientProtocol, request: RagRequest) -> PROverview:
+async def build_pr_overview(
+    client: ModelClientProtocol,
+    request: RagRequest,
+    *,
+    model: str | None = None,
+) -> PROverview:
     heuristic = _heuristic_overview(request)
     summary_payload = {
         "title": request.title or "Untitled PR",
@@ -69,7 +74,13 @@ async def build_pr_overview(client: ModelClientProtocol, request: RagRequest) ->
         OllamaMessage(role="user", content=json.dumps(summary_payload, ensure_ascii=True)),
     ]
     try:
-        payload = await client.chat_structured(messages, PROverview.model_json_schema(), temperature=0.0, num_ctx=2048)
+        payload = await client.chat_structured(
+            messages,
+            PROverview.model_json_schema(),
+            model=model,
+            temperature=0.0,
+            num_ctx=2048,
+        )
         overview = PROverview.model_validate(payload)
         if not overview.hotspots:
             return heuristic

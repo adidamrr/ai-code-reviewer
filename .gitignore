@@ -19,3 +19,12 @@ rag-ml/kb/**/index/
 rag-ml/build/
 rag-ml/.venv/
 .env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env
+frontend/.env.local
+backend/.env.local
+!.env.example
+!backend/.env.example
+!frontend/.env.example

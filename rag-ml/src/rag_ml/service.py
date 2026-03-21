@@ -39,7 +39,6 @@ from .schemas import (
 )
 from .sparse_index import build_sparse_index, load_sparse_index
 from .static_signals import collect_static_signals
-from .style_rules import rule_based_style_candidates
 from .synthesizer import synthesize_suggestions
 from .validator import SuggestionValidator
 from .verifier import FindingVerifier
@@ -139,6 +138,26 @@ def _merge_hits(hit_groups: list[list], *, top_k: int) -> list:
     return sorted(best_by_chunk.values(), key=lambda item: item.finalScore, reverse=True)[:top_k]
 
 
+def _required_runtime_models(
+    config: RagConfig,
+    *,
+    generation_model: str | None = None,
+    repair_model: str | None = None,
+) -> list[str]:
+    required_models: list[str] = []
+    if config.enable_dense_retrieval:
+        required_models.append(config.embed_model)
+        if config.query_embed_model not in required_models:
+            required_models.append(config.query_embed_model)
+    effective_generation_model = generation_model or config.generation_model
+    effective_repair_model = repair_model or config.repair_model or effective_generation_model
+    if effective_generation_model not in required_models:
+        required_models.append(effective_generation_model)
+    if effective_repair_model and effective_repair_model not in required_models:
+        required_models.append(effective_repair_model)
+    return required_models
+
+
 async def _emit_progress(
     callback: Callable[[dict[str, Any]], Any] | None,
     update: ProgressUpdate,
@@ -151,7 +170,7 @@ async def _emit_progress(
 
 
 def _effective_scope(config: RagConfig, request: RagRequest) -> set[str]:
-    requested_scope = {scope for scope in request.scope if scope in {"security", "bugs", "style", "performance"}}
+    requested_scope = {scope for scope in request.scope if scope in {"security", "bugs", "performance"}}
     if not config.enable_security and "security" in requested_scope:
         requested_scope.remove("security")
     if not config.enable_performance and "performance" in requested_scope:
@@ -285,6 +304,7 @@ async def build_artifacts(config: RagConfig, namespaces: set[str] | None = None)
     manifest = BuildManifest(
         generatedAt=now_iso(),
         embeddingModel=config.embed_model,
+        queryEmbeddingModel=config.query_embed_model if config.query_embed_model != config.embed_model else None,
         denseRetrievalEnabled=config.enable_dense_retrieval,
         namespaces=sorted(merged_meta.values(), key=lambda item: item.namespace),
     )
@@ -308,10 +328,13 @@ async def runtime_status() -> dict[str, Any]:
         "buildRoot": str(config.build_root),
         "modelProvider": config.model_provider,
         "embeddingModel": config.embed_model,
+        "queryEmbeddingModel": config.query_embed_model,
         "denseRetrievalEnabled": config.enable_dense_retrieval,
         "generationModel": config.generation_model,
         "repairModel": config.repair_model,
         "modelApiBaseUrl": config.model_api_base_url,
+        "yandexBaseUrl": config.yandex_base_url if config.model_provider == "yandex" else None,
+        "yandexFolderId": config.yandex_folder_id if config.model_provider == "yandex" else None,
         "requiredNamespaces": required_namespaces,
         "builtNamespaces": [],
         "missingArtifacts": [],
@@ -347,12 +370,7 @@ async def runtime_status() -> dict[str, Any]:
 
     client = create_model_client(config)
     try:
-        required_models = [config.generation_model]
-        if config.enable_dense_retrieval:
-            required_models.insert(0, config.embed_model)
-        if config.repair_model and config.repair_model not in required_models:
-            required_models.append(config.repair_model)
-        await client.ensure_models_available(required_models)
+        await client.ensure_models_available(_required_runtime_models(config))
     except ModelClientError as error:
         status["message"] = str(error)
         return status
@@ -377,12 +395,15 @@ async def analyze_request(
     config = load_config()
     request = RagRequest.model_validate(raw_request)
     runtime = _load_runtime(config)
-    required_models = [config.generation_model]
-    if config.enable_dense_retrieval:
-        required_models.insert(0, config.embed_model)
-    if config.repair_model and config.repair_model not in required_models:
-        required_models.append(config.repair_model)
-    await runtime.client.ensure_models_available(required_models)
+    generation_model = request.generationModel or config.generation_model
+    repair_model = request.repairModel or config.repair_model or generation_model
+    await runtime.client.ensure_models_available(
+        _required_runtime_models(
+            config,
+            generation_model=generation_model,
+            repair_model=repair_model,
+        )
+    )
     requested_scope = _effective_scope(config, request)
     if not requested_scope:
         return RagResponse(suggestions=[], partialFailures=0, meta={}).model_dump()
@@ -398,7 +419,7 @@ async def analyze_request(
             filesTotal=len(request.files),
         ),
     )
-    overview = await build_pr_overview(runtime.client, request)
+    overview = await build_pr_overview(runtime.client, request, model=generation_model)
     await _emit_progress(
         progress_callback,
         ProgressUpdate(
@@ -615,7 +636,10 @@ async def analyze_request(
                 query_text = build_query(task, category)
                 query_vector = None
                 if config.enable_dense_retrieval:
-                    query_vector = np.asarray((await runtime.client.embed_texts([query_text]))[0], dtype=np.float32)
+                    query_vector = np.asarray(
+                        (await runtime.client.embed_texts([query_text], model=config.query_embed_model))[0],
+                        dtype=np.float32,
+                    )
                 hits = runtime.retriever.search(namespaces, query_text, query_vector, top_k=config.default_topk)
                 if hits:
                     hits_by_category[category] = hits
@@ -626,9 +650,6 @@ async def analyze_request(
             score_by_chunk = {hit.chunkId: hit.finalScore for hit in merged_hits}
             accepted_any = False
             deterministic_candidates: list[CandidateFinding] = []
-            if "style" in active_categories:
-                style_hits = hits_by_category.get("style", [])
-                deterministic_candidates.extend(rule_based_style_candidates(task, style_hits))
             if any(category in active_categories for category in ("bugs", "security")):
                 deterministic_candidates.extend(rule_based_bug_candidates(task, signals))
             debug["ruleCandidates"] = len(deterministic_candidates)
@@ -655,6 +676,8 @@ async def analyze_request(
                         task,
                         active_categories,
                         context_pack,
+                        generation_model=generation_model,
+                        repair_model=repair_model,
                         max_findings=max_suggestions,
                     )
                 except Exception as error:
@@ -682,7 +705,12 @@ async def analyze_request(
                         if not verification.valid:
                             debug["rejected"][verification.reason or "verification_failed"] += 1
                             continue
-                        explained = await runtime.generator.explain(task, outline, context_pack)
+                        explained = await runtime.generator.explain(
+                            task,
+                            outline,
+                            context_pack,
+                            generation_model=generation_model,
+                        )
                         if append_ranked_candidate(
                             explained,
                             task=task,

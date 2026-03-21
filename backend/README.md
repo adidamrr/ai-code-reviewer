@@ -24,19 +24,25 @@ Backend MVP for AI code review plugin.
 docker compose -f docker-compose.ollama.yml up --build -d
 ```
 
-### API mode (without Ollama)
+### Yandex mode (without Ollama)
 ```bash
 docker compose -f docker-compose.api.yml up --build -d
 ```
 
-Оба варианта автоматически подготавливают RAG-артефакты перед запуском backend. В API-режиме сервис `ollama` вообще не поднимается.
+Оба варианта автоматически подготавливают RAG-артефакты перед запуском backend. В Yandex-режиме сервис `ollama` вообще не поднимается.
 
-Пример для Gemini OpenAI-compat:
+Пример для Yandex Cloud AI Studio:
 ```env
-RAG_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-RAG_API_KEY=ваш_GEMINI_API_KEY
-RAG_API_GENERATION_MODEL=gemini-3-flash-preview
-RAG_API_EMBED_MODEL=gemini-embedding-2-preview
+RAG_MODEL_PROVIDER=yandex
+RAG_YANDEX_BASE_URL=https://llm.api.cloud.yandex.net/v1
+RAG_YANDEX_FOLDER_ID=ваш_folder_id
+RAG_YANDEX_API_KEY=ваш_api_key
+RAG_YANDEX_DISABLE_DATA_LOGGING=true
+RAG_GENERATION_MODEL=gpt://ваш_folder_id/yandexgpt/latest
+RAG_EVAL_GENERATION_MODEL=gpt://ваш_folder_id/yandexgpt/latest
+RAG_EMBED_MODEL=emb://ваш_folder_id/text-search-doc/latest
+RAG_QUERY_EMBED_MODEL=emb://ваш_folder_id/text-search-query/latest
+RAG_REPAIR_MODEL=gpt://ваш_folder_id/yandexgpt/latest
 ```
 
 ## Run (Python/FastAPI)
@@ -61,20 +67,25 @@ Then open `http://localhost:4000`.
   - `Authorization: Bearer <token>`
 
 ## RAG model backends
-- Default mode: local `Ollama` (`RAG_MODEL_PROVIDER=ollama`).
-- New mode: remote OpenAI-compatible API (`RAG_MODEL_PROVIDER=api`).
+- Recommended mode: `Yandex Cloud AI Studio` (`RAG_MODEL_PROVIDER=yandex`).
+- Legacy local mode: `Ollama` (`RAG_MODEL_PROVIDER=ollama`).
 
-Example for API mode:
+Example for Yandex mode:
 ```bash
-export RAG_MODEL_PROVIDER=api
-export RAG_API_BASE_URL=https://your-provider.example/v1
-export RAG_API_KEY=your_api_key
-export RAG_GENERATION_MODEL=gpt-4.1-mini
-export RAG_EMBED_MODEL=text-embedding-3-small
+export RAG_MODEL_PROVIDER=yandex
+export RAG_YANDEX_BASE_URL=https://llm.api.cloud.yandex.net/v1
+export RAG_YANDEX_FOLDER_ID=your_folder_id
+export RAG_YANDEX_API_KEY=your_api_key
+export RAG_YANDEX_DISABLE_DATA_LOGGING=true
+export RAG_GENERATION_MODEL=gpt://your_folder_id/yandexgpt/latest
+export RAG_EVAL_GENERATION_MODEL=gpt://your_folder_id/yandexgpt/latest
+export RAG_EMBED_MODEL=emb://your_folder_id/text-search-doc/latest
+export RAG_QUERY_EMBED_MODEL=emb://your_folder_id/text-search-query/latest
+export RAG_REPAIR_MODEL=gpt://your_folder_id/yandexgpt/latest
 python main.py
 ```
 
-In API mode backend still uses the same RAG pipeline, but generation and embeddings are requested from the configured remote API instead of local Ollama.
+В Yandex mode backend использует тот же RAG pipeline, но generation идёт через AI Studio Chat Completions, а embeddings через Yandex textEmbedding API.
 
 ## Contract files
 - OpenAPI: `docs/openapi.v1.yaml`

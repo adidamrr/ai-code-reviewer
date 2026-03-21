@@ -50,13 +50,15 @@ class SuggestionGenerator:
         categories: list[str],
         context_pack: ContextPack,
         *,
+        generation_model: str | None = None,
+        repair_model: str | None = None,
         max_findings: int = 2,
     ) -> FindingOutlineEnvelope:
         messages = build_detection_messages(task, categories, context_pack, max_findings=max_findings)
         last_error: Exception | None = None
         for _attempt in range(2):
             try:
-                payload = await self.client.chat_structured(messages, self.outline_schema)
+                payload = await self.client.chat_structured(messages, self.outline_schema, model=generation_model)
                 return self._normalize_envelope(
                     FindingOutlineEnvelope.model_validate(payload),
                     task,
@@ -69,13 +71,20 @@ class SuggestionGenerator:
                     categories,
                     context_pack,
                     error.raw_content,
+                    repair_model=repair_model,
                     max_findings=max_findings,
                 )
                 if repaired is not None:
                     return repaired
             except (ModelClientError, ValueError) as error:
                 last_error = error
-        line_fallback = await self._detect_with_line_format(task, categories, context_pack, max_findings=max_findings)
+        line_fallback = await self._detect_with_line_format(
+            task,
+            categories,
+            context_pack,
+            generation_model=generation_model,
+            max_findings=max_findings,
+        )
         if line_fallback is not None:
             return line_fallback
         if last_error:
@@ -87,6 +96,8 @@ class SuggestionGenerator:
         task: HunkTask,
         outline: FindingOutline,
         context_pack: ContextPack,
+        *,
+        generation_model: str | None = None,
     ) -> CandidateFinding:
         messages = build_explainer_messages(task, outline, context_pack)
         title = outline.shortLabel.strip().capitalize()
@@ -95,7 +106,7 @@ class SuggestionGenerator:
             f"Review the affected code path and confirm the behavior around {outline.shortLabel}."
         )
         try:
-            payload = await self.client.chat_structured(messages, self.explainer_schema)
+            payload = await self.client.chat_structured(messages, self.explainer_schema, model=generation_model)
             explanation = FindingExplanation.model_validate(payload)
             title = explanation.title.strip() or title
             body = explanation.body.strip() or body
@@ -120,6 +131,7 @@ class SuggestionGenerator:
         context_pack: ContextPack,
         invalid_content: str,
         *,
+        repair_model: str | None = None,
         max_findings: int,
     ) -> FindingOutlineEnvelope | None:
         repair_messages = build_json_repair_messages(
@@ -133,7 +145,7 @@ class SuggestionGenerator:
             payload = await self.client.chat_structured(
                 repair_messages,
                 self.outline_schema,
-                model=getattr(self.client, "repair_model", None),
+                model=repair_model or getattr(self.client, "repair_model", None),
             )
             return self._normalize_envelope(
                 FindingOutlineEnvelope.model_validate(payload),
@@ -149,13 +161,14 @@ class SuggestionGenerator:
         categories: list[str],
         context_pack: ContextPack,
         *,
+        generation_model: str | None = None,
         max_findings: int,
     ) -> FindingOutlineEnvelope | None:
         if not hasattr(self.client, "chat_text"):
             return None
         messages = build_detection_line_messages(task, categories, context_pack, max_findings=max_findings)
         try:
-            content = await self.client.chat_text(messages)
+            content = await self.client.chat_text(messages, model=generation_model)
         except ModelClientError:
             return None
         return self._normalize_envelope(

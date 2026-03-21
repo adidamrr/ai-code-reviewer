@@ -337,10 +337,178 @@ class ApiModelClient(ModelClientProtocol):
         return ""
 
 
+class YandexModelClient(ModelClientProtocol):
+    def __init__(self, config: RagConfig) -> None:
+        self.base_url = config.yandex_base_url.rstrip("/")
+        self.embed_url = "https://ai.api.cloud.yandex.net/foundationModels/v1/textEmbedding"
+        self.api_key = config.yandex_api_key
+        self.folder_id = config.yandex_folder_id
+        self.timeout = config.ollama_timeout_seconds
+        self.generation_model = config.generation_model
+        self.embed_model = config.embed_model
+        self.query_embed_model = config.query_embed_model
+        self.embed_batch_size = 1
+        self.generation_max_tokens = config.generation_max_tokens
+        self.repair_model = config.repair_model or config.generation_model
+        self.disable_data_logging = config.yandex_disable_data_logging
+
+    def _chat_headers(self) -> dict[str, str]:
+        self._require_config(require_folder=True)
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+            "OpenAI-Project": self.folder_id or "",
+        }
+        if self.disable_data_logging:
+            headers["x-data-logging-enabled"] = "false"
+        return headers
+
+    def _embedding_headers(self) -> dict[str, str]:
+        self._require_config(require_folder=False)
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Api-Key {self.api_key}",
+        }
+        if self.disable_data_logging:
+            headers["x-data-logging-enabled"] = "false"
+        return headers
+
+    def _require_config(self, *, require_folder: bool) -> None:
+        if not self.base_url:
+            raise ModelClientError("RAG_YANDEX_BASE_URL is required when RAG_MODEL_PROVIDER=yandex")
+        if not self.api_key:
+            raise ModelClientError("RAG_YANDEX_API_KEY is required when RAG_MODEL_PROVIDER=yandex")
+        if require_folder and not self.folder_id:
+            raise ModelClientError("RAG_YANDEX_FOLDER_ID is required when RAG_MODEL_PROVIDER=yandex")
+
+    async def ensure_models_available(self, models: list[str]) -> None:
+        self._require_config(require_folder=True)
+        if not models:
+            return None
+        return None
+
+    async def embed_texts(self, texts: list[str], *, model: str | None = None) -> list[list[float]]:
+        self._require_config(require_folder=False)
+        if not texts:
+            return []
+
+        vectors: list[list[float]] = []
+        model_uri = model or self.embed_model
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            for text in texts:
+                response = await client.post(
+                    self.embed_url,
+                    headers=self._embedding_headers(),
+                    json={
+                        "modelUri": model_uri,
+                        "text": text,
+                    },
+                )
+                if response.status_code >= 400:
+                    raise ModelClientError(
+                        f"Yandex embeddings request failed: {response.status_code} {response.text}"
+                    )
+                data = response.json()
+                embedding = data.get("embedding")
+                if not isinstance(embedding, list):
+                    raise ModelClientError("Yandex embeddings response does not contain an embedding vector")
+                vectors.append(embedding)
+        return vectors
+
+    async def chat_structured(
+        self,
+        messages: list[OllamaMessage],
+        schema: dict[str, Any],
+        *,
+        model: str | None = None,
+        temperature: float = 0.1,
+        num_ctx: int = 4096,
+    ) -> dict[str, Any]:
+        response = await self._chat_completion(
+            messages,
+            model=model,
+            temperature=temperature,
+            num_ctx=num_ctx,
+            num_predict=self.generation_max_tokens,
+            schema=schema,
+        )
+        try:
+            return json.loads(response.text)
+        except json.JSONDecodeError as error:
+            raise StructuredOutputError(f"Yandex model returned invalid JSON: {error}", response.text) from error
+
+    async def chat_text(
+        self,
+        messages: list[OllamaMessage],
+        *,
+        model: str | None = None,
+        temperature: float = 0.1,
+        num_ctx: int = 4096,
+        num_predict: int | None = None,
+    ) -> str:
+        response = await self._chat_completion(
+            messages,
+            model=model,
+            temperature=temperature,
+            num_ctx=num_ctx,
+            num_predict=num_predict or self.generation_max_tokens,
+            schema=None,
+        )
+        return response.text
+
+    async def _chat_completion(
+        self,
+        messages: list[OllamaMessage],
+        *,
+        model: str | None,
+        temperature: float,
+        num_ctx: int,
+        num_predict: int,
+        schema: dict[str, Any] | None,
+    ) -> _ApiResponseContent:
+        self._require_config(require_folder=True)
+        payload: dict[str, Any] = {
+            "model": model or self.generation_model,
+            "messages": [message.model_dump() for message in messages],
+            "temperature": temperature,
+            "max_tokens": num_predict,
+        }
+        if schema is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "rag_structured_output",
+                    "schema": schema,
+                },
+            }
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._chat_headers(),
+                json=payload,
+            )
+        if response.status_code >= 400:
+            raise ModelClientError(f"Yandex chat request failed: {response.status_code} {response.text}")
+        data = response.json()
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ModelClientError("Yandex chat response does not contain choices")
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if not isinstance(message, dict):
+            raise ModelClientError("Yandex chat response does not contain a message payload")
+        content = ApiModelClient._extract_message_content(message)
+        if not content.strip():
+            raise ModelClientError("Yandex chat response does not contain text content")
+        return _ApiResponseContent(text=content)
+
+
 def create_model_client(config: RagConfig) -> ModelClientProtocol:
     provider = config.model_provider.strip().lower()
     if provider == "ollama":
         return OllamaClient(config)
     if provider == "api":
         return ApiModelClient(config)
+    if provider == "yandex":
+        return YandexModelClient(config)
     raise ModelClientError(f"Unsupported RAG_MODEL_PROVIDER: {config.model_provider}")

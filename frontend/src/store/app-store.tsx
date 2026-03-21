@@ -6,6 +6,7 @@ import type {
   AnalysisJobEvent,
   CursorPage,
   FeedbackSummary,
+  GenerationModelProfile,
   GithubPr,
   GithubRepo,
   GithubSession,
@@ -21,13 +22,11 @@ const DEFAULT_BACKEND =
   import.meta.env.VITE_BACKEND_BASE_URL ??
   (typeof window !== "undefined" ? window.location.origin : "http://localhost:4000");
 const DEFAULT_SERVICE_TOKEN = import.meta.env.VITE_API_SERVICE_TOKEN ?? "";
-
-const RECENT_REPOS_KEY = "swagreviewer_recent_repos_v1";
+const ENABLE_DEBUG_SUITE = import.meta.env.VITE_ENABLE_DEBUG_SUITE === "true";
 const WORKSPACE_PREFERENCES_KEY = "swagreviewer_repo_workspace_v1";
 
 export const WORKSPACE_STEPS: WorkspaceStep[] = [
   "pr",
-  "params",
   "job",
   "results",
   "publish",
@@ -37,7 +36,6 @@ export const WORKSPACE_STEPS: WorkspaceStep[] = [
 
 export const STEP_LABELS: Record<WorkspaceStep, string> = {
   pr: "PR",
-  params: "Параметры",
   job: "Job",
   results: "Результаты",
   publish: "Публикация",
@@ -46,6 +44,18 @@ export const STEP_LABELS: Record<WorkspaceStep, string> = {
 };
 
 export const ALL_SCOPES: SuggestionScope[] = ["security", "style", "bugs", "performance"];
+export const ANALYSIS_SCOPES: SuggestionScope[] = ["bugs", "security", "performance"];
+
+export const GENERATION_MODEL_OPTIONS: Array<{
+  id: GenerationModelProfile;
+  label: string;
+  description: string;
+}> = [
+  { id: "yandexgpt-pro", label: "YandexGPT Pro", description: "Основной balanced режим для review." },
+  { id: "yandexgpt-lite", label: "YandexGPT Lite", description: "Быстрый и более дешевый прогон." },
+  { id: "qwen3-235b", label: "Qwen3 235B", description: "Тяжелые PR и длинный контекст." },
+  { id: "gpt-oss-120b", label: "GPT OSS 120B", description: "Альтернативная сильная open model." },
+];
 
 export const SCOPE_LABELS: Record<SuggestionScope, string> = {
   security: "Безопасность",
@@ -85,11 +95,13 @@ interface ActivityLog {
   text: string;
 }
 
-interface RecentRepoItem {
+interface RecentReviewItem {
+  reviewKey: string;
   repoId: string;
-  fullName: string;
-  owner: string;
-  name: string;
+  prNumber: number;
+  repoFullName: string;
+  prTitle: string;
+  status: "ready" | "running" | "results" | "published";
   lastOpenedAt: string;
 }
 
@@ -99,16 +111,22 @@ interface PersistedWorkspacePreference {
   prState: "open" | "closed" | "all";
 }
 
-interface RepoWorkspaceState {
+interface RepoBrowserState {
   repoId: string;
   prState: "open" | "closed" | "all";
   prSearch: string;
   prs: GithubPr[];
   selectedPrNumber: number | null;
+}
+
+interface ReviewWorkspaceState {
+  repoId: string;
+  prNumber: number | null;
 
   syncData: SyncResponse | null;
 
   scope: Record<SuggestionScope, boolean>;
+  generationModelProfile: GenerationModelProfile;
   maxComments: number;
   minSeverity: "none" | Suggestion["severity"];
   fileFilter: string;
@@ -153,6 +171,7 @@ interface RepoWorkspaceState {
   historyIsMock: boolean;
 
   activeStep: WorkspaceStep;
+  lastTouchedAt: string | null;
 }
 
 interface AppState {
@@ -167,12 +186,13 @@ interface AppState {
   repoCursor: string | null;
   selectedRepoId: string | null;
 
-  recentRepos: RecentRepoItem[];
-  workflows: Record<string, RepoWorkspaceState>;
+  repoBrowsers: Record<string, RepoBrowserState>;
+  reviewWorkspaces: Record<string, ReviewWorkspaceState>;
 
   busy: boolean;
   error: string | null;
   activity: ActivityLog[];
+  debugSuiteEnabled: boolean;
 
   debugSuite: {
     running: boolean;
@@ -216,12 +236,14 @@ interface AppStoreActions {
   selectPullRequest: (repoId: string, prNumber: number | null) => void;
 
   syncPullRequest: (repoId: string) => Promise<void>;
+  analyzePullRequest: (repoId: string) => Promise<void>;
 
   setActiveStep: (repoId: string, step: WorkspaceStep) => void;
   setMaxComments: (repoId: string, value: number) => void;
   setMinSeverity: (repoId: string, value: "none" | Suggestion["severity"]) => void;
   setFileFilter: (repoId: string, value: string) => void;
   toggleScope: (repoId: string, scope: SuggestionScope) => void;
+  setGenerationModelProfile: (repoId: string, value: GenerationModelProfile) => void;
 
   createAnalysisJob: (repoId: string) => Promise<void>;
   refreshJob: (repoId: string) => Promise<void>;
@@ -253,7 +275,9 @@ interface AppStoreActions {
 
 interface AppStoreValue extends AppState {
   actions: AppStoreActions;
-  getWorkflow: (repoId: string | null | undefined) => RepoWorkspaceState | null;
+  recentReviews: RecentReviewItem[];
+  getWorkflow: (repoId: string | null | undefined) => ReviewWorkspaceState | null;
+  getRepoBrowser: (repoId: string | null | undefined) => RepoBrowserState | null;
   getSelectedRepo: () => GithubRepo | null;
   getRepoStatus: (repoId: string) => { label: string; tone: "ok" | "warn" | "muted" };
   canOpenStep: (repoId: string, step: WorkspaceStep) => boolean;
@@ -271,11 +295,12 @@ const initialState: AppState = {
   repos: [],
   repoCursor: null,
   selectedRepoId: null,
-  recentRepos: loadRecentRepos(),
-  workflows: {},
+  repoBrowsers: {},
+  reviewWorkspaces: {},
   busy: false,
   error: null,
   activity: [],
+  debugSuiteEnabled: ENABLE_DEBUG_SUITE,
   debugSuite: {
     running: false,
     items: DEBUG_PR_PRESETS.map((preset) => ({
@@ -306,21 +331,24 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
   }, [state]);
 
   useEffect(() => {
-    persistRecentRepos(state.recentRepos);
-  }, [state.recentRepos]);
-
-  useEffect(() => {
     const payload: Record<string, PersistedWorkspacePreference> = {};
-    for (const [repoId, workflow] of Object.entries(state.workflows)) {
+    for (const [repoId, browser] of Object.entries(state.repoBrowsers)) {
+      const reviewKey = browser.selectedPrNumber !== null ? getReviewKey(repoId, browser.selectedPrNumber) : null;
+      const review = reviewKey ? state.reviewWorkspaces[reviewKey] : null;
       payload[repoId] = {
-        selectedPrNumber: workflow.selectedPrNumber,
-        activeStep: workflow.activeStep,
-        prState: workflow.prState,
+        selectedPrNumber: browser.selectedPrNumber,
+        activeStep: review?.activeStep ?? "pr",
+        prState: browser.prState,
       };
     }
     workspacePreferencesRef.current = payload;
     persistWorkspacePreferences(payload);
-  }, [state.workflows]);
+  }, [state.repoBrowsers, state.reviewWorkspaces]);
+
+  const resetWorkspacePreferences = useCallback(() => {
+    workspacePreferencesRef.current = {};
+    clearWorkspacePreferences();
+  }, []);
 
   const apiFactory = useCallback(() => {
     const current = stateRef.current;
@@ -351,7 +379,12 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
   const sleep = useCallback((ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms)), []);
 
   const ensureRepoLoaded = useCallback(
-    async (sessionId: string, owner: string, name: string): Promise<GithubRepo> => {
+    async (
+      sessionId: string,
+      provider: GithubSession["provider"],
+      owner: string,
+      name: string,
+    ): Promise<GithubRepo> => {
       const normalize = (value: string) => value.trim().toLowerCase();
       const targetOwner = normalize(owner);
       const targetName = normalize(name);
@@ -373,7 +406,6 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       let pageCount = 0;
 
       while (pageCount < 30) {
-        const provider = stateRef.current.session?.provider ?? "github";
         const page: CursorPage<GithubRepo> = provider === "gitlab"
           ? await api.getGitlabRepos(sessionId, cursor)
           : await api.getGithubRepos(sessionId, cursor);
@@ -434,70 +466,99 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
     [pushActivity, setBusy],
   );
 
-  const upsertWorkflow = useCallback((repoId: string, updater: (current: RepoWorkspaceState) => RepoWorkspaceState) => {
+  const upsertRepoBrowser = useCallback((repoId: string, updater: (current: RepoBrowserState) => RepoBrowserState) => {
     setState((prev) => {
-      const existing = prev.workflows[repoId] ?? createDefaultWorkflow(repoId, workspacePreferencesRef.current[repoId]);
+      const existing = prev.repoBrowsers[repoId] ?? createDefaultRepoBrowser(repoId, workspacePreferencesRef.current[repoId]);
       return {
         ...prev,
-        workflows: {
-          ...prev.workflows,
+        repoBrowsers: {
+          ...prev.repoBrowsers,
           [repoId]: updater(existing),
         },
       };
     });
   }, []);
 
-  const touchRecentRepo = useCallback((repo: GithubRepo) => {
+  const upsertReviewWorkspace = useCallback(
+    (reviewKey: string, updater: (current: ReviewWorkspaceState) => ReviewWorkspaceState) => {
+      setState((prev) => {
+        const existing = prev.reviewWorkspaces[reviewKey] ?? createDefaultReviewWorkspaceFromKey(reviewKey);
+        return {
+          ...prev,
+          reviewWorkspaces: {
+            ...prev.reviewWorkspaces,
+            [reviewKey]: updater(existing),
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const touchReviewWorkspace = useCallback((reviewKey: string) => {
     setState((prev) => {
       const now = new Date().toISOString();
-      const deduped = prev.recentRepos.filter((item) => item.repoId !== repo.repoId);
-      const next: RecentRepoItem[] = [
-        {
-          repoId: repo.repoId,
-          fullName: repo.fullName,
-          owner: repo.owner,
-          name: repo.name,
-          lastOpenedAt: now,
-        },
-        ...deduped,
-      ].slice(0, 8);
-
+      const existing = prev.reviewWorkspaces[reviewKey] ?? createDefaultReviewWorkspaceFromKey(reviewKey);
       return {
         ...prev,
-        recentRepos: next,
+        reviewWorkspaces: {
+          ...prev.reviewWorkspaces,
+          [reviewKey]: {
+            ...existing,
+            lastTouchedAt: now,
+          },
+        },
       };
     });
   }, []);
 
+  const getCurrentReviewContext = useCallback((repoId: string) => {
+    const browser = stateRef.current.repoBrowsers[repoId] ?? createDefaultRepoBrowser(repoId, workspacePreferencesRef.current[repoId]);
+    const prNumber = browser.selectedPrNumber;
+    if (prNumber === null) {
+      return {
+        browser,
+        prNumber,
+        reviewKey: null,
+        review: createDefaultReviewWorkspace(repoId, null),
+      };
+    }
+
+    const reviewKey = getReviewKey(repoId, prNumber);
+    const review = stateRef.current.reviewWorkspaces[reviewKey] ?? createDefaultReviewWorkspace(repoId, prNumber);
+
+    return {
+      browser,
+      prNumber,
+      reviewKey,
+      review,
+    };
+  }, []);
+
   const selectRepoInternal = useCallback(
-    (repoId: string, repo?: GithubRepo | null) => {
+    (repoId: string) => {
       setState((prev) => {
-        const nextWorkflows = prev.workflows[repoId]
-          ? prev.workflows
+        const nextRepoBrowsers = prev.repoBrowsers[repoId]
+          ? prev.repoBrowsers
           : {
-              ...prev.workflows,
-              [repoId]: createDefaultWorkflow(repoId, workspacePreferencesRef.current[repoId]),
+              ...prev.repoBrowsers,
+              [repoId]: createDefaultRepoBrowser(repoId, workspacePreferencesRef.current[repoId]),
             };
 
         return {
           ...prev,
           selectedRepoId: repoId,
-          workflows: nextWorkflows,
+          repoBrowsers: nextRepoBrowsers,
         };
       });
-
-      if (repo) {
-        touchRecentRepo(repo);
-      }
     },
-    [touchRecentRepo],
+    [],
   );
 
   const loadReposInternal = useCallback(
-    async (sessionId: string, reset: boolean) => {
+    async (sessionId: string, provider: GithubSession["provider"], reset: boolean) => {
       const current = stateRef.current;
       const api = apiFactory();
-      const provider = stateRef.current.session?.provider ?? "github";
       const page = provider === "gitlab"
         ? await api.getGitlabRepos(sessionId, reset ? null : current.repoCursor)
         : await api.getGithubRepos(sessionId, reset ? null : current.repoCursor);
@@ -521,7 +582,7 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const loadSuggestionsInternal = useCallback(
-    async (repoId: string, jobId: string) => {
+    async (reviewKey: string, jobId: string) => {
       const api = apiFactory();
       let cursor: string | null = null;
       const items: Suggestion[] = [];
@@ -532,7 +593,7 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
         cursor = page.nextCursor;
       } while (cursor);
 
-      upsertWorkflow(repoId, (workflow) => {
+      upsertReviewWorkspace(reviewKey, (workflow) => {
         const inlineIds = items.filter((item) => (item.deliveryMode ?? "inline") === "inline").map((item) => item.id);
         const selectedSuggestionIds = workflow.selectedSuggestionIds.length > 0
           ? workflow.selectedSuggestionIds.filter((id) => inlineIds.includes(id))
@@ -541,6 +602,7 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
         return {
           ...workflow,
           suggestions: items,
+          lastTouchedAt: new Date().toISOString(),
           selectedSuggestionIds,
           activeSuggestionId: workflow.activeSuggestionId && items.some((item) => item.id === workflow.activeSuggestionId)
             ? workflow.activeSuggestionId
@@ -551,14 +613,14 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
 
       pushActivity(`Загружено рекомендаций: ${items.length}`);
     },
-    [apiFactory, pushActivity, upsertWorkflow],
+    [apiFactory, pushActivity, upsertReviewWorkspace],
   );
 
   const loadCommentsInternal = useCallback(
-    async (repoId: string, prId: string) => {
+    async (reviewKey: string, prId: string) => {
       const api = apiFactory();
       let cursor: string | null = null;
-      const all: RepoWorkspaceState["comments"] = [];
+      const all: ReviewWorkspaceState["comments"] = [];
 
       do {
         const page = await api.getPrComments(prId, cursor);
@@ -566,28 +628,30 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
         cursor = page.nextCursor;
       } while (cursor);
 
-      upsertWorkflow(repoId, (workflow) => ({
+      upsertReviewWorkspace(reviewKey, (workflow) => ({
         ...workflow,
+        lastTouchedAt: new Date().toISOString(),
         comments: all,
       }));
     },
-    [apiFactory, upsertWorkflow],
+    [apiFactory, upsertReviewWorkspace],
   );
 
   const loadFeedbackSummaryInternal = useCallback(
-    async (repoId: string, prId: string) => {
+    async (reviewKey: string, prId: string) => {
       const api = apiFactory();
       const summary = await api.getFeedbackSummary(prId);
-      upsertWorkflow(repoId, (workflow) => ({
+      upsertReviewWorkspace(reviewKey, (workflow) => ({
         ...workflow,
+        lastTouchedAt: new Date().toISOString(),
         feedbackSummary: summary,
       }));
     },
-    [apiFactory, upsertWorkflow],
+    [apiFactory, upsertReviewWorkspace],
   );
 
   const loadJobEventsInternal = useCallback(
-    async (repoId: string, jobId: string) => {
+    async (reviewKey: string, jobId: string) => {
       const api = apiFactory();
       let cursor: string | null = null;
       const events: AnalysisJobEvent[] = [];
@@ -599,14 +663,129 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
           cursor = page.nextCursor;
         } while (cursor);
 
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, jobEvents: events }));
+        upsertReviewWorkspace(reviewKey, (workflow) => ({
+          ...workflow,
+          lastTouchedAt: new Date().toISOString(),
+          jobEvents: events,
+        }));
       } catch (_error) {
-        const job = stateRef.current.workflows[repoId]?.job;
+        const job = stateRef.current.reviewWorkspaces[reviewKey]?.job;
         const mockEvents = createMockEvents(job);
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, jobEvents: mockEvents }));
+        upsertReviewWorkspace(reviewKey, (workflow) => ({
+          ...workflow,
+          lastTouchedAt: new Date().toISOString(),
+          jobEvents: mockEvents,
+        }));
       }
     },
-    [apiFactory, upsertWorkflow],
+    [apiFactory, upsertReviewWorkspace],
+  );
+
+  const startAnalysisJobInternal = useCallback(
+    async (
+      reviewKey: string,
+      syncData: SyncResponse,
+      scope: SuggestionScope[],
+      maxComments: number,
+    ) => {
+      const bootStartedAt = new Date().toISOString();
+      const pendingJobId = `pending-${crypto.randomUUID()}`;
+
+      upsertReviewWorkspace(reviewKey, (current) => ({
+        ...current,
+        syncData,
+        activeStep: "job",
+        jobBooting: true,
+        jobBootStartedAt: bootStartedAt,
+        lastTouchedAt: bootStartedAt,
+        job: {
+          id: pendingJobId,
+          prId: syncData.prId,
+          snapshotId: syncData.snapshotId,
+          status: "queued",
+          scope,
+          generationModelProfile: current.generationModelProfile,
+          maxComments,
+          progress: {
+            filesDone: 0,
+            total: syncData.counts.files,
+            stage: "overview",
+            stageProgress: { done: 0, total: 1 },
+          },
+          summary: {
+            totalSuggestions: 0,
+            partialFailures: 0,
+            filesSkipped: 0,
+            warnings: [],
+          },
+          errorMessage: null,
+          createdAt: bootStartedAt,
+          updatedAt: bootStartedAt,
+        },
+        jobEvents: [
+          {
+            id: `local-${crypto.randomUUID()}`,
+            jobId: pendingJobId,
+            level: "info",
+            message: "Запрос на создание job отправлен. Backend формирует снимок и запускает анализ.",
+            filePath: null,
+            stage: "overview",
+            meta: {
+              files: syncData.counts.files,
+              scope,
+            },
+            createdAt: bootStartedAt,
+          },
+        ],
+      }));
+
+      try {
+        await runTask("Задача анализа создана", async () => {
+          const api = apiFactory();
+          const current = stateRef.current.reviewWorkspaces[reviewKey] ?? createDefaultReviewWorkspaceFromKey(reviewKey);
+          const created = await api.createAnalysisJob(syncData.prId, {
+            snapshotId: syncData.snapshotId,
+            scope,
+            maxComments,
+            modelProfile: current.generationModelProfile,
+          });
+
+          const fresh = await api.getAnalysisJob(created.jobId);
+          upsertReviewWorkspace(reviewKey, (current) => ({
+            ...current,
+            generationModelProfile: fresh.generationModelProfile ?? current.generationModelProfile,
+            job: fresh,
+            jobBooting: false,
+            jobBootStartedAt: null,
+            activeStep: "job",
+            lastTouchedAt: new Date().toISOString(),
+          }));
+
+          await loadJobEventsInternal(reviewKey, fresh.id);
+
+          if (fresh.status === "done") {
+            await loadSuggestionsInternal(reviewKey, fresh.id);
+          }
+        });
+      } catch (error) {
+        const message = formatUiError(error, stateRef.current.backendUrl);
+        upsertReviewWorkspace(reviewKey, (current) => ({
+          ...current,
+          jobBooting: false,
+          jobBootStartedAt: null,
+          lastTouchedAt: new Date().toISOString(),
+          job: current.job
+            ? {
+                ...current.job,
+                status: "failed",
+                errorMessage: message,
+                updatedAt: new Date().toISOString(),
+              }
+            : null,
+        }));
+      }
+    },
+    [apiFactory, loadJobEventsInternal, loadSuggestionsInternal, runTask, upsertReviewWorkspace],
   );
 
   const actions: AppStoreActions = useMemo(
@@ -646,15 +825,19 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
         await runTask(`${provider === "gitlab" ? "GitLab" : "GitHub"} сессия создана`, async () => {
           const api = apiFactory();
           const session = provider === "gitlab" ? await api.createGitlabSession(token) : await api.createGithubSession(token);
+          resetWorkspacePreferences();
 
           setState((prev) => ({
             ...prev,
             session,
             repos: [],
             repoCursor: null,
+            selectedRepoId: null,
+            repoBrowsers: {},
+            reviewWorkspaces: {},
           }));
 
-          await loadReposInternal(session.sessionId, true);
+          await loadReposInternal(session.sessionId, session.provider, true);
         });
 
         return true;
@@ -673,6 +856,7 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
           } else {
             await api.deleteGithubSession(current.session!.sessionId);
           }
+          resetWorkspacePreferences();
 
           setState((prev) => ({
             ...prev,
@@ -680,7 +864,8 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
             repos: [],
             repoCursor: null,
             selectedRepoId: null,
-            workflows: {},
+            repoBrowsers: {},
+            reviewWorkspaces: {},
           }));
         });
       },
@@ -699,23 +884,26 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       },
 
       loadRepos: async (reset = false) => {
-        const sessionId = stateRef.current.session?.sessionId;
-        if (!sessionId) {
+        const session = stateRef.current.session;
+        if (!session?.sessionId) {
           setState((prev) => ({ ...prev, error: "Нет активной SCM-сессии" }));
           return;
         }
 
         await runTask("Репозитории загружены", async () => {
-          await loadReposInternal(sessionId, reset);
+          await loadReposInternal(session.sessionId, session.provider, reset);
         });
       },
 
       selectRepo: (repoId) => {
-        const repo = stateRef.current.repos.find((item) => item.repoId === repoId);
-        selectRepoInternal(repoId, repo);
+        selectRepoInternal(repoId);
       },
 
       runDebugSuite: async () => {
+        if (!stateRef.current.debugSuiteEnabled) {
+          return;
+        }
+
         const sessionId = stateRef.current.session?.sessionId;
         if (!sessionId) {
           setState((prev) => ({ ...prev, error: "Нет активной SCM-сессии" }));
@@ -788,11 +976,11 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
             pushActivity(`[debug] start ${preset.owner}/${preset.repo}#${preset.prNumber}`);
 
             try {
-              const repo = await ensureRepoLoaded(sessionId, preset.owner, preset.repo);
-              selectRepoInternal(repo.repoId, repo);
-
-              upsertWorkflow(repo.repoId, (workflow) => ({
-                ...workflow,
+              const repo = await ensureRepoLoaded(sessionId, stateRef.current.session?.provider ?? "github", preset.owner, preset.repo);
+              const reviewKey = getReviewKey(repo.repoId, preset.prNumber);
+              selectRepoInternal(repo.repoId);
+              upsertRepoBrowser(repo.repoId, (browser) => ({
+                ...browser,
                 selectedPrNumber: preset.prNumber,
               }));
 
@@ -801,11 +989,11 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
                 ? await api.syncGitlabMr(sessionId, String(repo.providerRepoId), preset.prNumber)
                 : await api.syncGithubPr(sessionId, repo.owner, repo.name, preset.prNumber);
 
-              upsertWorkflow(repo.repoId, (workflow) => ({
+              upsertReviewWorkspace(reviewKey, (workflow) => ({
                 ...workflow,
+                prNumber: preset.prNumber,
                 syncData: sync,
-                selectedPrNumber: preset.prNumber,
-                activeStep: "params",
+                activeStep: "job",
                 job: null,
                 jobBooting: false,
                 jobBootStartedAt: null,
@@ -816,24 +1004,28 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
                 publishResult: null,
                 comments: [],
                 feedbackSummary: null,
+                lastTouchedAt: new Date().toISOString(),
               }));
 
-              const scope = (preset.scope?.length ? preset.scope : ["security", "bugs", "style"]) as SuggestionScope[];
+              const scope = (preset.scope?.length ? preset.scope : ["bugs", "security"]) as SuggestionScope[];
               const maxComments = preset.maxComments ?? 40;
 
               const created = await api.createAnalysisJob(sync.prId, {
                 snapshotId: sync.snapshotId,
                 scope,
                 maxComments,
+                modelProfile: "yandexgpt-pro",
               });
 
               updateItem(preset.id, { repoId: repo.repoId, jobId: created.jobId });
 
               const fresh = await api.getAnalysisJob(created.jobId);
-              upsertWorkflow(repo.repoId, (workflow) => ({
+              upsertReviewWorkspace(reviewKey, (workflow) => ({
                 ...workflow,
+                generationModelProfile: fresh.generationModelProfile ?? workflow.generationModelProfile,
                 job: fresh,
                 activeStep: "job",
+                lastTouchedAt: new Date().toISOString(),
               }));
 
               const deadline = Date.now() + 15 * 60 * 1000;
@@ -846,16 +1038,21 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
 
                 await sleep(2000);
                 current = await api.getAnalysisJob(created.jobId);
-                upsertWorkflow(repo.repoId, (workflow) => ({ ...workflow, job: current }));
+                upsertReviewWorkspace(reviewKey, (workflow) => ({
+                  ...workflow,
+                  generationModelProfile: current.generationModelProfile ?? workflow.generationModelProfile,
+                  job: current,
+                  lastTouchedAt: new Date().toISOString(),
+                }));
               }
 
               if (current.status !== "done" && current.status !== "failed" && current.status !== "canceled") {
                 throw new Error("Timeout ожидания завершения job (15m).");
               }
 
-              await loadJobEventsInternal(repo.repoId, current.id);
+              await loadJobEventsInternal(reviewKey, current.id);
               if (current.status === "done") {
-                await loadSuggestionsInternal(repo.repoId, current.id);
+                await loadSuggestionsInternal(reviewKey, current.id);
               }
 
               updateItem(preset.id, {
@@ -894,17 +1091,17 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       },
 
       setPrState: (repoId, value) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, prState: value }));
+        upsertRepoBrowser(repoId, (browser) => ({ ...browser, prState: value }));
       },
 
       setPrSearch: (repoId, value) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, prSearch: value }));
+        upsertRepoBrowser(repoId, (browser) => ({ ...browser, prSearch: value }));
       },
 
       loadPullRequests: async (repoId) => {
         const session = stateRef.current.session;
         const repo = stateRef.current.repos.find((item) => item.repoId === repoId);
-        const workflow = stateRef.current.workflows[repoId] ?? createDefaultWorkflow(repoId, workspacePreferencesRef.current[repoId]);
+        const browser = stateRef.current.repoBrowsers[repoId] ?? createDefaultRepoBrowser(repoId, workspacePreferencesRef.current[repoId]);
 
         if (!session || !repo) {
           setState((prev) => ({ ...prev, error: "Сначала подключите SCM и выберите репозиторий" }));
@@ -914,44 +1111,57 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
         await runTask(`PR загружены (${repo.fullName})`, async () => {
           const api = apiFactory();
           const response = session.provider === "gitlab"
-            ? await api.getGitlabMrs(session.sessionId, String(repo.providerRepoId), workflow.prState)
-            : await api.getGithubPrs(session.sessionId, repo.owner, repo.name, workflow.prState);
+            ? await api.getGitlabMrs(session.sessionId, String(repo.providerRepoId), browser.prState)
+            : await api.getGithubPrs(session.sessionId, repo.owner, repo.name, browser.prState);
 
-          upsertWorkflow(repoId, (current) => ({
+          upsertRepoBrowser(repoId, (current) => ({
             ...current,
             prs: response.items,
             selectedPrNumber: current.selectedPrNumber && response.items.some((pr) => pr.number === current.selectedPrNumber)
               ? current.selectedPrNumber
               : response.items[0]?.number ?? null,
-            activeStep: "pr",
           }));
         });
       },
 
       selectPullRequest: (repoId, prNumber) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, selectedPrNumber: prNumber }));
+        upsertRepoBrowser(repoId, (browser) => ({ ...browser, selectedPrNumber: prNumber }));
+        if (prNumber !== null) {
+          const reviewKey = getReviewKey(repoId, prNumber);
+          const existing = stateRef.current.reviewWorkspaces[reviewKey];
+          const nextStep = deriveWorkspaceLandingStep(existing);
+          upsertReviewWorkspace(reviewKey, (workflow) => ({
+            ...workflow,
+            repoId,
+            prNumber,
+            activeStep: nextStep,
+            lastTouchedAt: workflow.syncData || workflow.job ? new Date().toISOString() : workflow.lastTouchedAt,
+          }));
+        }
       },
 
       syncPullRequest: async (repoId) => {
         const session = stateRef.current.session;
         const repo = stateRef.current.repos.find((item) => item.repoId === repoId);
-        const workflow = stateRef.current.workflows[repoId];
+        const { prNumber, reviewKey, review } = getCurrentReviewContext(repoId);
 
-        if (!session || !repo || !workflow?.selectedPrNumber) {
+        if (!session || !repo || !prNumber || !reviewKey) {
           setState((prev) => ({ ...prev, error: "Сначала выберите репозиторий и PR" }));
           return;
         }
 
-        await runTask(`PR синхронизирован (${repo.fullName}#${workflow.selectedPrNumber})`, async () => {
+        await runTask(`PR синхронизирован (${repo.fullName}#${prNumber})`, async () => {
           const api = apiFactory();
           const sync = session.provider === "gitlab"
-            ? await api.syncGitlabMr(session.sessionId, String(repo.providerRepoId), workflow.selectedPrNumber!)
-            : await api.syncGithubPr(session.sessionId, repo.owner, repo.name, workflow.selectedPrNumber!);
+            ? await api.syncGitlabMr(session.sessionId, String(repo.providerRepoId), prNumber)
+            : await api.syncGithubPr(session.sessionId, repo.owner, repo.name, prNumber);
 
-          upsertWorkflow(repoId, (current) => ({
+          upsertReviewWorkspace(reviewKey, (current) => ({
             ...current,
+            repoId,
+            prNumber,
             syncData: sync,
-            activeStep: "params",
+            activeStep: "pr",
             job: null,
             jobBooting: false,
             jobBootStartedAt: null,
@@ -962,37 +1172,107 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
             publishResult: null,
             comments: [],
             feedbackSummary: null,
-            runs: current.runs,
-            runsCursor: current.runsCursor,
-            historyIsMock: current.historyIsMock,
+            lastTouchedAt: new Date().toISOString(),
+            maxComments: review.maxComments,
           }));
         });
       },
 
+      analyzePullRequest: async (repoId) => {
+        const session = stateRef.current.session;
+        const repo = stateRef.current.repos.find((item) => item.repoId === repoId);
+        const { prNumber, reviewKey, review } = getCurrentReviewContext(repoId);
+
+        if (!session || !repo || !prNumber || !reviewKey) {
+          setState((prev) => ({ ...prev, error: "Сначала выберите репозиторий и PR" }));
+          return;
+        }
+
+        const scope = ANALYSIS_SCOPES.filter((item) => review.scope[item]);
+        if (scope.length === 0) {
+          setState((prev) => ({ ...prev, error: "Выберите хотя бы одну область анализа" }));
+          return;
+        }
+
+        const sync = await runTask(`Подготовлен snapshot для ${repo.fullName}#${prNumber}`, async () => {
+          const api = apiFactory();
+          const response = session.provider === "gitlab"
+            ? await api.syncGitlabMr(session.sessionId, String(repo.providerRepoId), prNumber)
+            : await api.syncGithubPr(session.sessionId, repo.owner, repo.name, prNumber);
+
+          upsertReviewWorkspace(reviewKey, (current) => ({
+            ...current,
+            repoId,
+            prNumber,
+            syncData: response,
+            activeStep: "job",
+            job: null,
+            jobBooting: false,
+            jobBootStartedAt: null,
+            jobEvents: [],
+            suggestions: [],
+            selectedSuggestionIds: [],
+            activeSuggestionId: null,
+            publishResult: null,
+            comments: [],
+            feedbackSummary: null,
+            lastTouchedAt: new Date().toISOString(),
+          }));
+
+          return response;
+        });
+
+        await startAnalysisJobInternal(reviewKey, sync, scope, review.maxComments);
+      },
+
       setActiveStep: (repoId, step) => {
-        const canOpen = canOpenStepWithWorkflow(stateRef.current.workflows[repoId], step);
+        const { review } = getCurrentReviewContext(repoId);
+        const canOpen = canOpenStepWithWorkflow(review, step);
         if (!canOpen) {
           return;
         }
 
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, activeStep: step }));
+        if (review.prNumber === null) {
+          return;
+        }
+
+        upsertReviewWorkspace(getReviewKey(repoId, review.prNumber), (workflow) => ({
+          ...workflow,
+          activeStep: step,
+        }));
       },
 
       setMaxComments: (repoId, value) => {
         const next = Number.isFinite(value) ? Math.max(1, Math.min(500, Math.floor(value))) : 30;
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, maxComments: next }));
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({ ...workflow, maxComments: next }));
       },
 
       setMinSeverity: (repoId, value) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, minSeverity: value }));
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({ ...workflow, minSeverity: value }));
       },
 
       setFileFilter: (repoId, value) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, fileFilter: value }));
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({ ...workflow, fileFilter: value }));
       },
 
       toggleScope: (repoId, scope) => {
-        upsertWorkflow(repoId, (workflow) => ({
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({
           ...workflow,
           scope: {
             ...workflow.scope,
@@ -1001,177 +1281,123 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
         }));
       },
 
+      setGenerationModelProfile: (repoId, value) => {
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({
+          ...workflow,
+          generationModelProfile: value,
+        }));
+      },
+
       createAnalysisJob: async (repoId) => {
-        const workflow = stateRef.current.workflows[repoId];
-        if (!workflow?.syncData) {
+        const { reviewKey, review } = getCurrentReviewContext(repoId);
+        if (!reviewKey || !review.syncData) {
           setState((prev) => ({ ...prev, error: "Сначала выполните синхронизацию PR" }));
           return;
         }
 
-        const scope = ALL_SCOPES.filter((item) => workflow.scope[item]);
+        const scope = ANALYSIS_SCOPES.filter((item) => review.scope[item]);
         if (scope.length === 0) {
           setState((prev) => ({ ...prev, error: "Выберите хотя бы одну область анализа" }));
           return;
         }
 
-        const bootStartedAt = new Date().toISOString();
-        const pendingJobId = `pending-${crypto.randomUUID()}`;
-
-        upsertWorkflow(repoId, (current) => ({
-          ...current,
-          activeStep: "job",
-          jobBooting: true,
-          jobBootStartedAt: bootStartedAt,
-          job: {
-            id: pendingJobId,
-            prId: current.syncData!.prId,
-            snapshotId: current.syncData!.snapshotId,
-            status: "queued",
-            scope,
-            maxComments: current.maxComments,
-            progress: {
-              filesDone: 0,
-              total: current.syncData?.counts.files ?? 0,
-              stage: "overview",
-              stageProgress: { done: 0, total: 1 },
-            },
-            summary: {
-              totalSuggestions: 0,
-              partialFailures: 0,
-              filesSkipped: 0,
-              warnings: [],
-            },
-            errorMessage: null,
-            createdAt: bootStartedAt,
-            updatedAt: bootStartedAt,
-          },
-          jobEvents: [
-            {
-              id: `local-${crypto.randomUUID()}`,
-              jobId: pendingJobId,
-              level: "info",
-              message: "Запрос на создание job отправлен. Для больших PR backend может отвечать несколько минут.",
-              filePath: null,
-              stage: "overview",
-              meta: {
-                files: current.syncData?.counts.files ?? 0,
-                scope,
-              },
-              createdAt: bootStartedAt,
-            },
-          ],
-        }));
-
-        try {
-          await runTask("Задача анализа создана", async () => {
-            const api = apiFactory();
-            const created = await api.createAnalysisJob(workflow.syncData!.prId, {
-              snapshotId: workflow.syncData!.snapshotId,
-              scope,
-              maxComments: workflow.maxComments,
-            });
-
-            const fresh = await api.getAnalysisJob(created.jobId);
-            upsertWorkflow(repoId, (current) => ({
-              ...current,
-              job: fresh,
-              jobBooting: false,
-              jobBootStartedAt: null,
-              activeStep: "job",
-            }));
-
-            await loadJobEventsInternal(repoId, fresh.id);
-
-            if (fresh.status === "done") {
-              await loadSuggestionsInternal(repoId, fresh.id);
-            }
-          });
-        } catch (error) {
-          const message = formatUiError(error, stateRef.current.backendUrl);
-          upsertWorkflow(repoId, (current) => ({
-            ...current,
-            jobBooting: false,
-            jobBootStartedAt: null,
-            job: current.job
-              ? {
-                  ...current.job,
-                  status: "failed",
-                  errorMessage: message,
-                  updatedAt: new Date().toISOString(),
-                }
-              : null,
-          }));
-        }
+        await startAnalysisJobInternal(reviewKey, review.syncData, scope, review.maxComments);
       },
 
       refreshJob: async (repoId) => {
-        const workflow = stateRef.current.workflows[repoId];
-        if (!workflow?.job || workflow.job.id.startsWith("pending-")) {
+        const { reviewKey, review } = getCurrentReviewContext(repoId);
+        if (!reviewKey || !review.job || review.job.id.startsWith("pending-")) {
           return;
         }
+        const job = review.job;
 
         await runTask("Состояние задачи обновлено", async () => {
           const api = apiFactory();
-          const fresh = await api.getAnalysisJob(workflow.job!.id);
+          const fresh = await api.getAnalysisJob(job.id);
 
-          upsertWorkflow(repoId, (current) => ({
+          upsertReviewWorkspace(reviewKey, (current) => ({
             ...current,
+            generationModelProfile: fresh.generationModelProfile ?? current.generationModelProfile,
             job: fresh,
             jobBooting: false,
             jobBootStartedAt: null,
+            lastTouchedAt: new Date().toISOString(),
           }));
-          await loadJobEventsInternal(repoId, fresh.id);
+          await loadJobEventsInternal(reviewKey, fresh.id);
 
           if (fresh.status === "done") {
-            await loadSuggestionsInternal(repoId, fresh.id);
+            await loadSuggestionsInternal(reviewKey, fresh.id);
           }
         });
       },
 
       cancelJob: async (repoId) => {
-        const workflow = stateRef.current.workflows[repoId];
-        if (!workflow?.job || workflow.job.id.startsWith("pending-")) {
+        const { reviewKey, review } = getCurrentReviewContext(repoId);
+        if (!reviewKey || !review.job || review.job.id.startsWith("pending-")) {
           return;
         }
+        const job = review.job;
 
         await runTask("Задача анализа отменена", async () => {
           const api = apiFactory();
-          const canceled = await api.cancelAnalysisJob(workflow.job!.id);
-          upsertWorkflow(repoId, (current) => ({
+          const canceled = await api.cancelAnalysisJob(job.id);
+          upsertReviewWorkspace(reviewKey, (current) => ({
             ...current,
             job: canceled,
             jobBooting: false,
             jobBootStartedAt: null,
+            lastTouchedAt: new Date().toISOString(),
           }));
-          await loadJobEventsInternal(repoId, canceled.id);
+          await loadJobEventsInternal(reviewKey, canceled.id);
         });
       },
 
       loadJobEvents: async (repoId) => {
-        const workflow = stateRef.current.workflows[repoId];
-        if (!workflow?.job || workflow.job.id.startsWith("pending-")) {
+        const { reviewKey, review } = getCurrentReviewContext(repoId);
+        if (!reviewKey || !review.job || review.job.id.startsWith("pending-")) {
           return;
         }
+        const job = review.job;
 
         await runTask("Лента событий обновлена", async () => {
-          await loadJobEventsInternal(repoId, workflow.job!.id);
+          await loadJobEventsInternal(reviewKey, job.id);
         });
       },
 
       setSuggestionSearch: (repoId, value) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, suggestionSearch: value }));
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({ ...workflow, suggestionSearch: value }));
       },
 
       setSuggestionCategoryFilter: (repoId, value) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, suggestionCategoryFilter: value }));
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({ ...workflow, suggestionCategoryFilter: value }));
       },
 
       setSeverityFilter: (repoId, value) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, severityFilter: value }));
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({ ...workflow, severityFilter: value }));
       },
 
       toggleSuggestionSelection: (repoId, suggestionId) => {
-        upsertWorkflow(repoId, (workflow) => {
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => {
           const selectedSuggestionIds = workflow.selectedSuggestionIds.includes(suggestionId)
             ? workflow.selectedSuggestionIds.filter((id) => id !== suggestionId)
             : [...workflow.selectedSuggestionIds, suggestionId];
@@ -1184,57 +1410,80 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       },
 
       setActiveSuggestion: (repoId, suggestionId) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, activeSuggestionId: suggestionId }));
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({ ...workflow, activeSuggestionId: suggestionId }));
       },
 
       selectAllSuggestions: (repoId) => {
-        upsertWorkflow(repoId, (workflow) => ({
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({
           ...workflow,
           selectedSuggestionIds: workflow.suggestions.map((item) => item.id),
         }));
       },
 
       clearSuggestionSelection: (repoId) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, selectedSuggestionIds: [] }));
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({ ...workflow, selectedSuggestionIds: [] }));
       },
 
       reloadSuggestions: async (repoId) => {
-        const workflow = stateRef.current.workflows[repoId];
-        if (!workflow?.job) {
+        const { reviewKey, review } = getCurrentReviewContext(repoId);
+        if (!reviewKey || !review.job) {
           return;
         }
+        const job = review.job;
 
         await runTask("Рекомендации обновлены", async () => {
-          await loadSuggestionsInternal(repoId, workflow.job!.id);
+          await loadSuggestionsInternal(reviewKey, job.id);
         });
       },
 
       setPublishMode: (repoId, mode) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, publishMode: mode }));
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({ ...workflow, publishMode: mode }));
       },
 
       setDryRun: (repoId, dryRun) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, dryRun }));
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({ ...workflow, dryRun }));
       },
 
       publishSuggestions: async (repoId) => {
-        const workflow = stateRef.current.workflows[repoId];
-        if (!workflow?.job) {
+        const { reviewKey, review } = getCurrentReviewContext(repoId);
+        if (!reviewKey || !review.job) {
           setState((prev) => ({ ...prev, error: "Сначала запустите анализ" }));
           return;
         }
+        const job = review.job;
 
-        const prId = workflow.syncData?.prId ?? workflow.job.prId;
+        const prId = review.syncData?.prId ?? job.prId;
 
-        await runTask(`Публикация запрошена (dryRun=${String(workflow.dryRun)})`, async () => {
+        await runTask(`Публикация запрошена (dryRun=${String(review.dryRun)})`, async () => {
           const api = apiFactory();
           const response = await api.publishSuggestions(prId, {
-            jobId: workflow.job!.id,
-            mode: workflow.publishMode,
-            dryRun: workflow.dryRun,
+            jobId: job.id,
+            mode: review.publishMode,
+            dryRun: review.dryRun,
+            sessionId: stateRef.current.session?.sessionId,
           });
 
-          upsertWorkflow(repoId, (current) => ({
+          upsertReviewWorkspace(reviewKey, (current) => ({
             ...current,
             publishResult: {
               publishRunId: response.publishRunId,
@@ -1243,43 +1492,54 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
               errors: response.errors,
             },
             comments: response.comments,
+            lastTouchedAt: new Date().toISOString(),
             activeStep: current.dryRun ? "publish" : "feedback",
           }));
 
-          if (!workflow.dryRun) {
-            await loadCommentsInternal(repoId, prId);
-            await loadFeedbackSummaryInternal(repoId, prId);
+          if (!review.dryRun) {
+            await loadCommentsInternal(reviewKey, prId);
+            await loadFeedbackSummaryInternal(reviewKey, prId);
           }
         });
       },
 
       loadComments: async (repoId) => {
-        const workflow = stateRef.current.workflows[repoId];
-        const prId = workflow?.syncData?.prId ?? workflow?.job?.prId;
+        const { reviewKey, review } = getCurrentReviewContext(repoId);
+        const prId = review.syncData?.prId ?? review.job?.prId;
         if (!prId) {
           setState((prev) => ({ ...prev, error: "Нет связанного PR" }));
           return;
         }
 
         await runTask("Комментарии PR обновлены", async () => {
-          await loadCommentsInternal(repoId, prId);
+          if (reviewKey) {
+            await loadCommentsInternal(reviewKey, prId);
+          }
         });
       },
 
       setFeedbackUserId: (repoId, userId) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, feedbackUserId: userId }));
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({ ...workflow, feedbackUserId: userId }));
       },
 
       setFeedbackReason: (repoId, reason) => {
-        upsertWorkflow(repoId, (workflow) => ({ ...workflow, feedbackReason: reason }));
+        const { prNumber } = getCurrentReviewContext(repoId);
+        if (prNumber === null) {
+          return;
+        }
+        upsertReviewWorkspace(getReviewKey(repoId, prNumber), (workflow) => ({ ...workflow, feedbackReason: reason }));
       },
 
       voteComment: async (repoId, commentId, vote) => {
-        const workflow = stateRef.current.workflows[repoId];
-        const userId = workflow?.feedbackUserId?.trim();
-        const prId = workflow?.syncData?.prId ?? workflow?.job?.prId;
+        const { reviewKey, review } = getCurrentReviewContext(repoId);
+        const userId = review.feedbackUserId?.trim();
+        const prId = review.syncData?.prId ?? review.job?.prId;
 
-        if (!workflow || !userId || !prId) {
+        if (!reviewKey || !userId || !prId) {
           setState((prev) => ({ ...prev, error: "Нужен ID пользователя и связанный PR" }));
           return;
         }
@@ -1289,43 +1549,60 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
           await api.putFeedback(commentId, {
             userId,
             vote,
-            reason: workflow.feedbackReason.trim() || undefined,
+            reason: review.feedbackReason.trim() || undefined,
           });
 
-          await loadFeedbackSummaryInternal(repoId, prId);
+          await loadFeedbackSummaryInternal(reviewKey, prId);
         });
       },
 
       loadFeedbackSummary: async (repoId) => {
-        const workflow = stateRef.current.workflows[repoId];
-        const prId = workflow?.syncData?.prId ?? workflow?.job?.prId;
+        const { reviewKey, review } = getCurrentReviewContext(repoId);
+        const prId = review.syncData?.prId ?? review.job?.prId;
         if (!prId) {
           setState((prev) => ({ ...prev, error: "Нет связанного PR" }));
           return;
         }
 
         await runTask("Сводка фидбека обновлена", async () => {
-          await loadFeedbackSummaryInternal(repoId, prId);
+          if (reviewKey) {
+            await loadFeedbackSummaryInternal(reviewKey, prId);
+          }
         });
       },
 
       loadRepoRuns: async (repoId, reset = true) => {
-        const cursor = reset ? null : stateRef.current.workflows[repoId]?.runsCursor ?? null;
+        const { prNumber, reviewKey, review } = getCurrentReviewContext(repoId);
+        const cursor = reset ? null : review.runsCursor ?? null;
 
         await runTask("История запусков обновлена", async () => {
           const api = apiFactory();
 
           try {
             const page = await api.getRepoRuns(repoId, cursor);
-            upsertWorkflow(repoId, (workflow) => ({
+            if (!reviewKey && prNumber === null) {
+              const fallbackPrNumber = page.items[0]?.prNumber ?? null;
+              if (fallbackPrNumber !== null) {
+                upsertRepoBrowser(repoId, (browser) => ({ ...browser, selectedPrNumber: fallbackPrNumber }));
+              }
+            }
+            const targetPrNumber = prNumber ?? page.items[0]?.prNumber ?? null;
+            if (targetPrNumber === null) {
+              return;
+            }
+            upsertReviewWorkspace(getReviewKey(repoId, targetPrNumber), (workflow) => ({
               ...workflow,
               runs: reset ? page.items : [...workflow.runs, ...page.items],
               runsCursor: page.nextCursor,
               historyIsMock: false,
             }));
           } catch (_error) {
-            const fallbackRuns = createMockRunsFromWorkflow(stateRef.current.workflows[repoId]);
-            upsertWorkflow(repoId, (workflow) => ({
+            const targetPrNumber = prNumber ?? review.prNumber;
+            if (targetPrNumber === null) {
+              return;
+            }
+            const fallbackRuns = createMockRunsFromWorkflow(stateRef.current.reviewWorkspaces[getReviewKey(repoId, targetPrNumber)]);
+            upsertReviewWorkspace(getReviewKey(repoId, targetPrNumber), (workflow) => ({
               ...workflow,
               runs: fallbackRuns,
               runsCursor: null,
@@ -1340,15 +1617,15 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
           const api = apiFactory();
           const job = await api.getAnalysisJob(run.jobId);
           const prMeta = await api.getPr(job.prId);
+          const selectedPrNumber = prMeta.pr.number;
+          const reviewKey = getReviewKey(repoId, selectedPrNumber);
 
-          upsertWorkflow(repoId, (workflow) => {
-            const selectedPrNumber = prMeta.pr.number;
-            const existingPr = workflow.prs.find((pr) => pr.number === selectedPrNumber);
-
+          upsertRepoBrowser(repoId, (browser) => {
+            const existingPr = browser.prs.find((pr) => pr.number === selectedPrNumber);
             const prs = existingPr
-              ? workflow.prs
+              ? browser.prs
               : [
-                  ...workflow.prs,
+                  ...browser.prs,
                   {
                     number: prMeta.pr.number,
                     title: prMeta.pr.title,
@@ -1362,30 +1639,38 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
                 ];
 
             return {
-              ...workflow,
+              ...browser,
               prs,
               selectedPrNumber,
-              syncData: {
-                repoId,
-                prId: prMeta.pr.id,
-                snapshotId: job.snapshotId,
-                counts: {
-                  files: prMeta.latestSnapshot?.filesCount ?? 0,
-                  additions: prMeta.latestSnapshot?.additions ?? 0,
-                  deletions: prMeta.latestSnapshot?.deletions ?? 0,
-                },
-                idempotent: true,
-                source: "history",
-              },
-              job,
-              activeStep: "results",
             };
           });
 
-          await loadJobEventsInternal(repoId, job.id);
-          await loadSuggestionsInternal(repoId, job.id);
-          await loadCommentsInternal(repoId, job.prId);
-          await loadFeedbackSummaryInternal(repoId, job.prId);
+          upsertReviewWorkspace(reviewKey, (workflow) => ({
+            ...workflow,
+            repoId,
+            prNumber: selectedPrNumber,
+            generationModelProfile: job.generationModelProfile ?? workflow.generationModelProfile,
+            syncData: {
+              repoId,
+              prId: prMeta.pr.id,
+              snapshotId: job.snapshotId,
+              counts: {
+                files: prMeta.latestSnapshot?.filesCount ?? 0,
+                additions: prMeta.latestSnapshot?.additions ?? 0,
+                deletions: prMeta.latestSnapshot?.deletions ?? 0,
+              },
+              idempotent: true,
+              source: "history",
+            },
+            job,
+            activeStep: "results",
+            lastTouchedAt: new Date().toISOString(),
+          }));
+
+          await loadJobEventsInternal(reviewKey, job.id);
+          await loadSuggestionsInternal(reviewKey, job.id);
+          await loadCommentsInternal(reviewKey, job.prId);
+          await loadFeedbackSummaryInternal(reviewKey, job.prId);
         });
       },
     }),
@@ -1397,23 +1682,37 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       loadReposInternal,
       loadSuggestionsInternal,
       ensureRepoLoaded,
+      getCurrentReviewContext,
+      resetWorkspacePreferences,
       runTask,
       sleep,
-      touchRecentRepo,
       selectRepoInternal,
-      upsertWorkflow,
+      startAnalysisJobInternal,
+      upsertRepoBrowser,
+      upsertReviewWorkspace,
     ],
   );
 
   const value: AppStoreValue = useMemo(
     () => ({
       ...state,
+      recentReviews: buildRecentReviews(state.reviewWorkspaces, state.repoBrowsers, state.repos),
       actions,
       getWorkflow: (repoId) => {
         if (!repoId) {
           return null;
         }
-        return state.workflows[repoId] ?? createDefaultWorkflow(repoId, workspacePreferencesRef.current[repoId]);
+        const browser = state.repoBrowsers[repoId] ?? createDefaultRepoBrowser(repoId, workspacePreferencesRef.current[repoId]);
+        if (browser.selectedPrNumber === null) {
+          return createDefaultReviewWorkspace(repoId, null);
+        }
+        return state.reviewWorkspaces[getReviewKey(repoId, browser.selectedPrNumber)] ?? createDefaultReviewWorkspace(repoId, browser.selectedPrNumber);
+      },
+      getRepoBrowser: (repoId) => {
+        if (!repoId) {
+          return null;
+        }
+        return state.repoBrowsers[repoId] ?? createDefaultRepoBrowser(repoId, workspacePreferencesRef.current[repoId]);
       },
       getSelectedRepo: () => {
         const currentRepoId = state.selectedRepoId;
@@ -1423,10 +1722,19 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
         return state.repos.find((repo) => repo.repoId === currentRepoId) ?? null;
       },
       getRepoStatus: (repoId) => {
-        const workflow = state.workflows[repoId];
+        const browser = state.repoBrowsers[repoId] ?? createDefaultRepoBrowser(repoId, workspacePreferencesRef.current[repoId]);
+        const workflow = browser.selectedPrNumber !== null
+          ? state.reviewWorkspaces[getReviewKey(repoId, browser.selectedPrNumber)]
+          : undefined;
         return deriveRepoStatus(workflow);
       },
-      canOpenStep: (repoId, step) => canOpenStepWithWorkflow(state.workflows[repoId], step),
+      canOpenStep: (repoId, step) => {
+        const browser = state.repoBrowsers[repoId] ?? createDefaultRepoBrowser(repoId, workspacePreferencesRef.current[repoId]);
+        const workflow = browser.selectedPrNumber !== null
+          ? state.reviewWorkspaces[getReviewKey(repoId, browser.selectedPrNumber)]
+          : undefined;
+        return canOpenStepWithWorkflow(workflow, step);
+      },
     }),
     [actions, state],
   );
@@ -1442,20 +1750,41 @@ export function useAppStore() {
   return context;
 }
 
-function createDefaultWorkflow(repoId: string, persisted?: PersistedWorkspacePreference): RepoWorkspaceState {
+function getReviewKey(repoId: string, prNumber: number): string {
+  return `${repoId}:${prNumber}`;
+}
+
+function parseReviewKey(reviewKey: string): { repoId: string; prNumber: number | null } {
+  const [repoId, rawPrNumber] = reviewKey.split(":");
+  const prNumber = rawPrNumber ? Number(rawPrNumber) : Number.NaN;
+  return {
+    repoId: repoId ?? "",
+    prNumber: Number.isFinite(prNumber) ? prNumber : null,
+  };
+}
+
+function createDefaultRepoBrowser(repoId: string, persisted?: PersistedWorkspacePreference): RepoBrowserState {
   return {
     repoId,
     prState: persisted?.prState ?? "open",
     prSearch: "",
     prs: [],
     selectedPrNumber: persisted?.selectedPrNumber ?? null,
+  };
+}
+
+function createDefaultReviewWorkspace(repoId: string, prNumber: number | null): ReviewWorkspaceState {
+  return {
+    repoId,
+    prNumber,
     syncData: null,
     scope: {
       security: true,
-      style: true,
       bugs: true,
+      style: false,
       performance: false,
     },
+    generationModelProfile: "yandexgpt-pro",
     maxComments: 30,
     minSeverity: "none",
     fileFilter: "",
@@ -1479,11 +1808,17 @@ function createDefaultWorkflow(repoId: string, persisted?: PersistedWorkspacePre
     runs: [],
     runsCursor: null,
     historyIsMock: false,
-    activeStep: persisted?.activeStep ?? "pr",
+    activeStep: "pr",
+    lastTouchedAt: null,
   };
 }
 
-function deriveRepoStatus(workflow: RepoWorkspaceState | undefined): { label: string; tone: "ok" | "warn" | "muted" } {
+function createDefaultReviewWorkspaceFromKey(reviewKey: string): ReviewWorkspaceState {
+  const { repoId, prNumber } = parseReviewKey(reviewKey);
+  return createDefaultReviewWorkspace(repoId, prNumber);
+}
+
+function deriveRepoStatus(workflow: ReviewWorkspaceState | undefined): { label: string; tone: "ok" | "warn" | "muted" } {
   if (!workflow) {
     return { label: "нет PR", tone: "muted" };
   }
@@ -1493,11 +1828,7 @@ function deriveRepoStatus(workflow: RepoWorkspaceState | undefined): { label: st
   }
 
   if (workflow.job && (workflow.job.status === "queued" || workflow.job.status === "running")) {
-    return { label: "есть job", tone: "ok" };
-  }
-
-  if (workflow.selectedPrNumber && !workflow.syncData) {
-    return { label: "нужен sync", tone: "warn" };
+    return { label: "идет анализ", tone: "ok" };
   }
 
   if (workflow.syncData && !workflow.job) {
@@ -1511,7 +1842,7 @@ function deriveRepoStatus(workflow: RepoWorkspaceState | undefined): { label: st
   return { label: "нет PR", tone: "muted" };
 }
 
-function canOpenStepWithWorkflow(workflow: RepoWorkspaceState | undefined, step: WorkspaceStep): boolean {
+function canOpenStepWithWorkflow(workflow: ReviewWorkspaceState | undefined, step: WorkspaceStep): boolean {
   if (!workflow) {
     return step === "pr";
   }
@@ -1520,7 +1851,7 @@ function canOpenStepWithWorkflow(workflow: RepoWorkspaceState | undefined, step:
     return true;
   }
 
-  if (step === "params" || step === "job") {
+  if (step === "job") {
     return Boolean(workflow.syncData);
   }
 
@@ -1547,44 +1878,63 @@ function canOpenStepWithWorkflow(workflow: RepoWorkspaceState | undefined, step:
   return false;
 }
 
-function loadRecentRepos(): RecentRepoItem[] {
-  if (typeof window === "undefined") {
-    return [];
-  }
+function buildRecentReviews(
+  reviewWorkspaces: Record<string, ReviewWorkspaceState>,
+  repoBrowsers: Record<string, RepoBrowserState>,
+  repos: GithubRepo[],
+): RecentReviewItem[] {
+  return Object.entries(reviewWorkspaces)
+    .filter(([, workflow]) => Boolean(workflow.syncData || workflow.job || workflow.publishResult))
+    .sort((a, b) => {
+      const aTouched = new Date(a[1].lastTouchedAt ?? a[1].job?.updatedAt ?? 0).getTime();
+      const bTouched = new Date(b[1].lastTouchedAt ?? b[1].job?.updatedAt ?? 0).getTime();
+      return bTouched - aTouched;
+    })
+    .slice(0, 8)
+    .map(([reviewKey, workflow]) => {
+      const repo = repos.find((item) => item.repoId === workflow.repoId);
+      const browser = repoBrowsers[workflow.repoId];
+      const prTitle = browser?.prs.find((item) => item.number === workflow.prNumber)?.title ?? `PR #${workflow.prNumber ?? "?"}`;
 
-  try {
-    const raw = window.localStorage.getItem(RECENT_REPOS_KEY);
-    if (!raw) {
-      return [];
-    }
-
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-
-    return parsed
-      .filter((item) => item && typeof item === "object")
-      .map((item) => ({
-        repoId: String(item.repoId ?? ""),
-        fullName: String(item.fullName ?? ""),
-        owner: String(item.owner ?? ""),
-        name: String(item.name ?? ""),
-        lastOpenedAt: String(item.lastOpenedAt ?? ""),
-      }))
-      .filter((item) => item.repoId && item.fullName)
-      .slice(0, 8);
-  } catch {
-    return [];
-  }
+      return {
+        reviewKey,
+        repoId: workflow.repoId,
+        prNumber: workflow.prNumber ?? 0,
+        repoFullName: repo?.fullName ?? workflow.repoId,
+        prTitle,
+        status: deriveRecentReviewStatus(workflow),
+        lastOpenedAt: workflow.lastTouchedAt ?? workflow.job?.updatedAt ?? new Date().toISOString(),
+      };
+    });
 }
 
-function persistRecentRepos(items: RecentRepoItem[]) {
-  if (typeof window === "undefined") {
-    return;
+function deriveRecentReviewStatus(workflow: ReviewWorkspaceState): RecentReviewItem["status"] {
+  if (workflow.publishResult && (workflow.publishResult.publishedCount > 0 || workflow.comments.length > 0)) {
+    return "published";
+  }
+  if (workflow.jobBooting || workflow.job?.status === "queued" || workflow.job?.status === "running") {
+    return "running";
+  }
+  if (workflow.job?.status === "done" || workflow.suggestions.length > 0) {
+    return "results";
+  }
+  return "ready";
+}
+
+function deriveWorkspaceLandingStep(workflow: ReviewWorkspaceState | undefined): WorkspaceStep {
+  if (!workflow) {
+    return "pr";
   }
 
-  window.localStorage.setItem(RECENT_REPOS_KEY, JSON.stringify(items));
+  if (workflow.jobBooting || workflow.job?.status === "queued" || workflow.job?.status === "running" || workflow.job?.status === "failed" || workflow.job?.status === "canceled") {
+    return "job";
+  }
+
+  if (workflow.job?.status === "done" || workflow.suggestions.length > 0 || workflow.publishResult || workflow.comments.length > 0) {
+    return "results";
+  }
+
+  return "pr";
 }
 
 function loadWorkspacePreferences(): Record<string, PersistedWorkspacePreference> {
@@ -1626,6 +1976,14 @@ function persistWorkspacePreferences(preferences: Record<string, PersistedWorksp
   window.localStorage.setItem(WORKSPACE_PREFERENCES_KEY, JSON.stringify(preferences));
 }
 
+function clearWorkspacePreferences() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.removeItem(WORKSPACE_PREFERENCES_KEY);
+}
+
 function createMockEvents(job: AnalysisJob | null | undefined): AnalysisJobEvent[] {
   const now = new Date().toISOString();
 
@@ -1659,7 +2017,7 @@ function createMockEvents(job: AnalysisJob | null | undefined): AnalysisJobEvent
   ];
 }
 
-function createMockRunsFromWorkflow(workflow: RepoWorkspaceState | undefined): RepoRunSummary[] {
+function createMockRunsFromWorkflow(workflow: ReviewWorkspaceState | undefined): RepoRunSummary[] {
   if (!workflow?.job) {
     return [];
   }
@@ -1671,8 +2029,8 @@ function createMockRunsFromWorkflow(workflow: RepoWorkspaceState | undefined): R
       repoId: workflow.repoId,
       repoFullName: workflow.repoId,
       prId: workflow.job.prId,
-      prNumber: workflow.selectedPrNumber ?? 0,
-      prTitle: workflow.prs.find((item) => item.number === workflow.selectedPrNumber)?.title ?? "Unknown PR",
+      prNumber: workflow.prNumber ?? 0,
+      prTitle: `PR #${workflow.prNumber ?? "?"}`,
       status: workflow.job.status,
       totalSuggestions: workflow.suggestions.length,
       publishedComments: workflow.comments.length,
@@ -1698,7 +2056,7 @@ function formatUiError(error: unknown, backendUrl: string): string {
 }
 
 function normalizeWorkspaceStep(value: unknown): WorkspaceStep {
-  if (value === "params" || value === "job" || value === "results" || value === "publish" || value === "feedback" || value === "history") {
+  if (value === "job" || value === "results" || value === "publish" || value === "feedback" || value === "history") {
     return value;
   }
   return "pr";

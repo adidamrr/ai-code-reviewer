@@ -37,7 +37,7 @@ class _FakeClient:
     async def ensure_models_available(self, models):
         return None
 
-    async def embed_texts(self, texts):
+    async def embed_texts(self, texts, *, model=None):
         return [[0.1, 0.2, 0.3] for _ in texts]
 
     async def chat_structured(self, messages, schema, **kwargs):
@@ -246,9 +246,13 @@ class RagPipelineV2Tests(unittest.IsolatedAsyncioTestCase):
             ollama_base_url="http://127.0.0.1:11434",
             model_api_base_url=None,
             model_api_key=None,
+            yandex_base_url="https://llm.api.cloud.yandex.net/v1",
+            yandex_folder_id=None,
+            yandex_api_key=None,
             generation_model="qwen2.5-coder:7b",
             eval_generation_model="qwen2.5-coder:14b",
             embed_model="nomic-embed-text",
+            query_embed_model="nomic-embed-text",
             enable_dense_retrieval=True,
             supported_languages=("dart",),
             primary_languages=("dart",),
@@ -261,6 +265,7 @@ class RagPipelineV2Tests(unittest.IsolatedAsyncioTestCase):
             embed_batch_size=64,
             generation_max_tokens=256,
             ollama_timeout_seconds=30.0,
+            yandex_disable_data_logging=True,
             repair_model="gemma3:12b",
         )
         request = {

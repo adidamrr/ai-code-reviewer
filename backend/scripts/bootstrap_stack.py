@@ -92,7 +92,50 @@ def validate_api_mode(base_url: str | None, api_key: str | None, generation_mode
     )
 
 
-def build_missing_artifacts(build_root: Path, generation_model: str, dense_enabled: bool, inventory_cmd: list[str], build_cmd: list[str]) -> None:
+def validate_yandex_mode(
+    base_url: str | None,
+    folder_id: str | None,
+    api_key: str | None,
+    generation_model: str,
+    embed_model: str,
+    query_embed_model: str,
+    dense_enabled: bool,
+) -> None:
+    missing: list[str] = []
+    if not (base_url or "").strip():
+        missing.append("RAG_YANDEX_BASE_URL")
+    if not (folder_id or "").strip():
+        missing.append("RAG_YANDEX_FOLDER_ID")
+    if not (api_key or "").strip():
+        missing.append("RAG_YANDEX_API_KEY")
+    if not (generation_model or "").strip():
+        missing.append("RAG_GENERATION_MODEL")
+    if dense_enabled and not (embed_model or "").strip():
+        missing.append("RAG_EMBED_MODEL")
+    if dense_enabled and not (query_embed_model or "").strip():
+        missing.append("RAG_QUERY_EMBED_MODEL")
+    if missing:
+        raise RuntimeError(
+            "Yandex bootstrap is missing required configuration: " + ", ".join(missing)
+        )
+    masked_key = (api_key or "")[:6] + "..." if api_key else "<missing>"
+    print(
+        "[bootstrap] Yandex mode enabled: "
+        f"base_url={base_url} folder_id={folder_id} generation_model={generation_model} "
+        f"embed_model={embed_model} query_embed_model={query_embed_model} dense_enabled={dense_enabled} api_key={masked_key}",
+        flush=True,
+    )
+
+
+def build_missing_artifacts(
+    build_root: Path,
+    generation_model: str,
+    embed_model: str,
+    query_embed_model: str,
+    dense_enabled: bool,
+    inventory_cmd: list[str],
+    build_cmd: list[str],
+) -> None:
 
     manifest_path = build_root / "build-manifest.json"
     if manifest_path.exists():
@@ -102,11 +145,20 @@ def build_missing_artifacts(build_root: Path, generation_model: str, dense_enabl
             manifest = None
         if isinstance(manifest, dict) and manifest.get("embeddingModel"):
             manifest_dense_enabled = manifest.get("denseRetrievalEnabled", True)
-            if manifest_dense_enabled == dense_enabled:
+            manifest_embed_model = manifest.get("embeddingModel")
+            manifest_query_embed_model = manifest.get("queryEmbeddingModel") or manifest_embed_model
+            if (
+                manifest_dense_enabled == dense_enabled
+                and manifest_embed_model == embed_model
+                and manifest_query_embed_model == query_embed_model
+            ):
                 print(f"[bootstrap] Reusing existing RAG artifacts from {build_root}", flush=True)
                 return
             print(
-                f"[bootstrap] Rebuilding RAG artifacts because denseRetrievalEnabled changed: manifest={manifest_dense_enabled} env={dense_enabled}",
+                "[bootstrap] Rebuilding RAG artifacts because embedding configuration changed: "
+                f"manifest_dense={manifest_dense_enabled} env_dense={dense_enabled} "
+                f"manifest_embed={manifest_embed_model} env_embed={embed_model} "
+                f"manifest_query_embed={manifest_query_embed_model} env_query_embed={query_embed_model}",
                 flush=True,
             )
 
@@ -124,11 +176,29 @@ def main() -> int:
 
     provider = (os.getenv("RAG_MODEL_PROVIDER") or "ollama").strip().lower()
     ollama_base_url = (os.getenv("RAG_OLLAMA_BASE_URL") or "http://ollama:11434").rstrip("/")
-    generation_model = (os.getenv("RAG_GENERATION_MODEL") or "qwen2.5-coder:7b").strip()
+    yandex_folder_id = (os.getenv("RAG_YANDEX_FOLDER_ID") or "").strip()
+    default_yandex_generation_model = (
+        f"gpt://{yandex_folder_id}/yandexgpt/latest" if yandex_folder_id else "gpt://folder-id/yandexgpt/latest"
+    )
+    default_yandex_doc_embed_model = (
+        f"emb://{yandex_folder_id}/text-search-doc/latest"
+        if yandex_folder_id
+        else "emb://folder-id/text-search-doc/latest"
+    )
+    default_yandex_query_embed_model = (
+        f"emb://{yandex_folder_id}/text-search-query/latest"
+        if yandex_folder_id
+        else "emb://folder-id/text-search-query/latest"
+    )
+
+    generation_model = (os.getenv("RAG_GENERATION_MODEL") or default_yandex_generation_model).strip()
     repair_model = (os.getenv("RAG_REPAIR_MODEL") or generation_model).strip()
-    embed_model = (os.getenv("RAG_EMBED_MODEL") or "nomic-embed-text").strip()
+    embed_model = (os.getenv("RAG_EMBED_MODEL") or default_yandex_doc_embed_model).strip()
+    query_embed_model = (os.getenv("RAG_QUERY_EMBED_MODEL") or default_yandex_query_embed_model).strip()
     api_base_url = (os.getenv("RAG_API_BASE_URL") or "").strip()
     api_key = (os.getenv("RAG_API_KEY") or "").strip()
+    yandex_base_url = (os.getenv("RAG_YANDEX_BASE_URL") or "https://llm.api.cloud.yandex.net/v1").strip()
+    yandex_api_key = (os.getenv("RAG_YANDEX_API_KEY") or "").strip()
     build_root = Path(os.getenv("RAG_BUILD_DIR") or "/rag-ml/build")
     dense_enabled = parse_bool(os.getenv("RAG_ENABLE_DENSE"), default=True)
 
@@ -142,6 +212,16 @@ def main() -> int:
         if dense_enabled:
             required_models.insert(0, embed_model)
         ensure_ollama_models(ollama_base_url, required_models)
+    elif provider == "yandex":
+        validate_yandex_mode(
+            yandex_base_url,
+            yandex_folder_id,
+            yandex_api_key,
+            generation_model,
+            embed_model,
+            query_embed_model,
+            dense_enabled,
+        )
     else:
         validate_api_mode(api_base_url, api_key, generation_model, embed_model, dense_enabled)
 
@@ -150,6 +230,8 @@ def main() -> int:
     build_missing_artifacts(
         build_root,
         generation_model,
+        embed_model,
+        query_embed_model,
         dense_enabled,
 
         [sys.executable, "../rag-ml/scripts/inventory.py"],
