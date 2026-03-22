@@ -222,6 +222,59 @@ class RagRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("result = normalize(payload)", evidence[0].snippet)
         self.assertEqual(evidence[0].metadata.get("docPath"), "/tmp/asyncio.txt")
 
+    def test_build_context_pack_creates_focused_code_window_with_highlight(self) -> None:
+        task = HunkTask(
+            taskId="src/example.py:0",
+            filePath="src/example.py",
+            language="Python",
+            languageSlug="python",
+            patch=(
+                "@@ -20,11 +20,11 @@\n"
+                " line_20\n"
+                " line_21\n"
+                " line_22\n"
+                " line_23\n"
+                " line_24\n"
+                "+problem_line()\n"
+                " line_26\n"
+                " line_27\n"
+                " line_28\n"
+                " line_29\n"
+                " line_30"
+            ),
+            hunkIndex=0,
+            hunkHeader="@@ -20,11 +20,11 @@",
+            hunkPatch=(
+                "@@ -20,11 +20,11 @@\n"
+                " line_20\n"
+                " line_21\n"
+                " line_22\n"
+                " line_23\n"
+                " line_24\n"
+                "+problem_line()\n"
+                " line_26\n"
+                " line_27\n"
+                " line_28\n"
+                " line_29\n"
+                " line_30"
+            ),
+            addedLines=["problem_line()"],
+            changedNewLines=[25],
+            firstChangedLine=25,
+            priority=1.0,
+        )
+
+        context = build_context_pack(task, [], [])
+        primary_candidate = context.codeEvidenceCandidates[0]
+        window = primary_candidate.metadata.get("contextWindow")
+
+        self.assertEqual(primary_candidate.lineStart, 25)
+        self.assertIsInstance(window, list)
+        self.assertEqual(len(window), 11)
+        self.assertEqual(window[5]["lineNumber"], 25)
+        self.assertTrue(window[5]["highlight"])
+        self.assertEqual(window[5]["text"], "problem_line()")
+
     def test_validator_rejects_missing_evidence(self) -> None:
         candidate = CandidateFinding(
             filePath="lib/example.dart",

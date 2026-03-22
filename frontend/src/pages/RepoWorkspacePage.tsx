@@ -18,7 +18,15 @@ type EvidenceMeta = Evidence["metadata"] & {
   headingPath?: unknown;
   docPath?: unknown;
   symbol?: unknown;
+  contextWindow?: unknown;
 };
+
+interface EvidenceWindowLine {
+  lineNumber: number;
+  text: string;
+  kind: "add" | "ctx" | "del";
+  highlight?: boolean;
+}
 
 function getEvidenceMetadata(item: Evidence): EvidenceMeta {
   return (item.metadata ?? {}) as EvidenceMeta;
@@ -68,6 +76,52 @@ function buildEvidenceLocation(item: Evidence): string | null {
 
 function buildEvidenceSnippet(item: Evidence): string {
   return item.snippet.replace(/\r\n/g, "\n").trim();
+}
+
+function getEvidenceWindow(item: Evidence): EvidenceWindowLine[] {
+  const metadata = getEvidenceMetadata(item);
+  if (!Array.isArray(metadata.contextWindow)) {
+    return [];
+  }
+
+  return metadata.contextWindow.flatMap((rawLine) => {
+    if (!rawLine || typeof rawLine !== "object") {
+      return [];
+    }
+
+    const candidate = rawLine as Record<string, unknown>;
+    const lineNumber = Number(candidate.lineNumber);
+    const text = typeof candidate.text === "string" ? candidate.text : "";
+    const rawKind = candidate.kind === "add" || candidate.kind === "del" ? candidate.kind : "ctx";
+
+    if (!Number.isFinite(lineNumber)) {
+      return [];
+    }
+
+    return [{
+      lineNumber,
+      text,
+      kind: rawKind,
+      highlight: candidate.highlight === true,
+    }];
+  });
+}
+
+function isEvidenceFocusLine(
+  line: EvidenceWindowLine,
+  item: Evidence,
+  activeSuggestion: Suggestion,
+): boolean {
+  if (item.filePath && item.filePath === activeSuggestion.filePath) {
+    return line.lineNumber >= activeSuggestion.lineStart && line.lineNumber <= activeSuggestion.lineEnd;
+  }
+
+  if (item.lineStart !== null && item.lineStart !== undefined) {
+    const end = item.lineEnd ?? item.lineStart;
+    return line.lineNumber >= item.lineStart && line.lineNumber <= end;
+  }
+
+  return line.highlight === true;
 }
 
 export function RepoWorkspacePage() {
@@ -841,6 +895,7 @@ export function RepoWorkspacePage() {
                   {activeSuggestion.evidence?.map((item) => {
                     const locationLabel = buildEvidenceLocation(item);
                     const snippet = buildEvidenceSnippet(item);
+                    const contextWindow = item.type === "code" ? getEvidenceWindow(item) : [];
 
                     return (
                       <article key={item.evidenceId} className={`citation-link evidence-block evidence-block-${item.type}`}>
@@ -852,9 +907,26 @@ export function RepoWorkspacePage() {
                             </a>
                           ) : null}
                         </div>
-                        <pre className="evidence-code-block">
-                          <code>{snippet}</code>
-                        </pre>
+                        {contextWindow.length > 0 ? (
+                          <div className="evidence-code-window" role="presentation">
+                            {contextWindow.map((line) => {
+                              const focusLine = isEvidenceFocusLine(line, item, activeSuggestion);
+                              return (
+                                <div
+                                  key={`${item.evidenceId}-${line.lineNumber}-${line.text}`}
+                                  className={`evidence-code-line ${line.kind} ${focusLine ? "focus" : ""}`}
+                                >
+                                  <span className="evidence-code-line-num">{line.lineNumber}</span>
+                                  <code>{line.text || " "}</code>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <pre className="evidence-code-block">
+                            <code>{snippet}</code>
+                          </pre>
+                        )}
                         {locationLabel ? <span className="mono evidence-location">{locationLabel}</span> : null}
                       </article>
                     );

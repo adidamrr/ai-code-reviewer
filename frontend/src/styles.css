@@ -1308,6 +1308,47 @@ button:disabled {
   word-break: break-word;
 }
 
+.evidence-code-window {
+  background: #020617;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid #111827;
+}
+
+.evidence-code-line {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 4px 12px;
+  color: #dbe7f6;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 0.77rem;
+  line-height: 1.5;
+}
+
+.evidence-code-line + .evidence-code-line {
+  border-top: 1px solid rgba(30, 41, 59, 0.75);
+}
+
+.evidence-code-line code {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.evidence-code-line-num {
+  color: #94a3b8;
+}
+
+.evidence-code-line.add {
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.evidence-code-line.focus {
+  background: rgba(245, 158, 11, 0.18);
+  box-shadow: inset 3px 0 0 #f59e0b;
+}
+
 .evidence-location {
   color: #64748b;
   font-size: 0.76rem;
