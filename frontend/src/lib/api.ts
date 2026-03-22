@@ -4,6 +4,7 @@ import type {
   AnalysisJobCreateResponse,
   CursorPage,
   FeedbackSummary,
+  GenerationModelProfile,
   GithubPr,
   GithubRepo,
   GithubSession,
@@ -132,7 +133,10 @@ export class ApiClient {
     );
   }
 
-  createAnalysisJob(prId: string, body: { snapshotId: string; scope: SuggestionScope[]; maxComments: number }) {
+  createAnalysisJob(
+    prId: string,
+    body: { snapshotId: string; scope: SuggestionScope[]; maxComments: number; modelProfile: GenerationModelProfile },
+  ) {
     return this.request<AnalysisJobCreateResponse>(`/prs/${prId}/analysis-jobs`, {
       method: "POST",
       body: JSON.stringify(body),
@@ -169,7 +173,7 @@ export class ApiClient {
     });
   }
 
-  publishSuggestions(prId: string, body: { jobId: string; mode: PublishMode; dryRun: boolean }) {
+  publishSuggestions(prId: string, body: { jobId: string; mode: PublishMode; dryRun: boolean; sessionId?: string }) {
     return this.request<{
       publishRunId: string;
       publishedCount: number;

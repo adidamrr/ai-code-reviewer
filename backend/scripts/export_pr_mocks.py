@@ -239,7 +239,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scope",
         nargs="+",
-        default=["security", "bugs", "style"],
+        default=["security", "bugs"],
         help="Scope по умолчанию для debug preset",
     )
     parser.add_argument(

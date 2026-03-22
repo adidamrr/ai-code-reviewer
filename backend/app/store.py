@@ -548,6 +548,8 @@ class InMemoryStore:
             "snapshotId": snapshot["id"],
             "status": "queued",
             "scope": payload["scope"],
+            "generationModelProfile": payload.get("generationModelProfile"),
+            "generationModel": payload.get("generationModel"),
             "filesFilter": files_filter if files_filter else None,
             "maxComments": payload["maxComments"],
             "progress": {
@@ -690,6 +692,7 @@ class InMemoryStore:
                 "description": "",
                 "baseSha": pr["baseSha"],
                 "headSha": pr["headSha"],
+                "generationModel": job.get("generationModel"),
                 "scope": job["scope"],
                 "files": [
                     {
@@ -824,28 +827,50 @@ class InMemoryStore:
         ranked = self._adapted_suggestions(items)
         return paginate(ranked, cursor, limit)
 
-    def publish(self, pr_id: str, job_id: str, mode: str, dry_run: bool) -> dict[str, Any]:
+    def _publish_key(self, pr_id: str, job_id: str, mode: str, dry_run: bool) -> str:
+        return f"{pr_id}:{job_id}:{mode}:{'dry' if dry_run else 'live'}"
+
+    def get_publish_result(self, pr_id: str, job_id: str, mode: str, dry_run: bool) -> dict[str, Any] | None:
+        existing = self.publish_runs.get(self._publish_key(pr_id, job_id, mode, dry_run))
+        if not existing:
+            return None
+
+        comments = [self.comments[item_id] for item_id in existing["publishedCommentIds"] if item_id in self.comments]
+        return {
+            "publishRunId": existing["id"],
+            "publishedCount": len(existing["publishedCommentIds"]),
+            "errors": existing["errors"],
+            "comments": comments,
+            "idempotent": True,
+        }
+
+    def get_publish_candidates(self, pr_id: str, job_id: str) -> list[dict[str, Any]]:
         job = self.get_job(job_id)
         if job["prId"] != pr_id:
             raise HttpError(422, "job_pr_mismatch", "jobId does not belong to this PR")
-
-        idempotency_key = f"{pr_id}:{job_id}:{mode}"
-        existing = self.publish_runs.get(idempotency_key)
-        if existing:
-            comments = [self.comments[item_id] for item_id in existing["publishedCommentIds"] if item_id in self.comments]
-            return {
-                "publishRunId": existing["id"],
-                "publishedCount": len(existing["publishedCommentIds"]),
-                "errors": existing["errors"],
-                "comments": comments,
-                "idempotent": True,
-            }
 
         suggestion_ids = self.suggestions_by_job.get(job["id"], [])
         adapted = self._adapted_suggestions(
             [self.suggestions[item_id] for item_id in suggestion_ids if item_id in self.suggestions]
         )
-        suggestions = [item for item in adapted if item.get("deliveryMode", "inline") == "inline"]
+        return [item for item in adapted if item.get("deliveryMode", "inline") == "inline"]
+
+    def publish(
+        self,
+        pr_id: str,
+        job_id: str,
+        mode: str,
+        dry_run: bool,
+        published_comments: list[dict[str, Any]] | None = None,
+        errors: list[str] | None = None,
+    ) -> dict[str, Any]:
+        existing = self.get_publish_result(pr_id, job_id, mode, dry_run)
+        if existing:
+            return existing
+
+        suggestions = self.get_publish_candidates(pr_id, job_id)
+        idempotency_key = self._publish_key(pr_id, job_id, mode, dry_run)
+        suggestion_by_id = {item["id"]: item for item in suggestions}
 
         run = {
             "id": f"pubrun_{uuid4()}",
@@ -855,25 +880,44 @@ class InMemoryStore:
             "mode": mode,
             "dryRun": dry_run,
             "publishedCommentIds": [],
-            "errors": [],
+            "errors": list(errors or []),
             "createdAt": now_iso(),
         }
 
         if not dry_run:
-            for suggestion in suggestions:
+            if published_comments is None:
+                published_comments = [
+                    {
+                        "suggestionId": suggestion["id"],
+                        "providerCommentId": f"ghc_{str(uuid4())[:8]}",
+                        "state": "posted",
+                        "filePath": suggestion["filePath"],
+                        "lineStart": suggestion["lineStart"],
+                        "lineEnd": suggestion["lineEnd"],
+                        "body": suggestion["body"],
+                        "createdAt": run["createdAt"],
+                    }
+                    for suggestion in suggestions
+                ]
+
+            for item in published_comments:
+                suggestion_id = str(item.get("suggestionId") or "")
+                suggestion = suggestion_by_id.get(suggestion_id)
+                if not suggestion:
+                    continue
                 comment = {
                     "id": f"cmt_{uuid4()}",
                     "prId": pr_id,
                     "jobId": job_id,
                     "suggestionId": suggestion["id"],
-                    "providerCommentId": f"ghc_{str(uuid4())[:8]}",
+                    "providerCommentId": str(item.get("providerCommentId") or "") or None,
                     "mode": mode,
-                    "state": "posted",
-                    "filePath": suggestion["filePath"],
-                    "lineStart": suggestion["lineStart"],
-                    "lineEnd": suggestion["lineEnd"],
-                    "body": suggestion["body"],
-                    "createdAt": run["createdAt"],
+                    "state": str(item.get("state") or "posted"),
+                    "filePath": str(item.get("filePath") or suggestion["filePath"]),
+                    "lineStart": int(item.get("lineStart") or suggestion["lineStart"]),
+                    "lineEnd": int(item.get("lineEnd") or suggestion["lineEnd"]),
+                    "body": str(item.get("body") or suggestion["body"]),
+                    "createdAt": str(item.get("createdAt") or run["createdAt"]),
                 }
                 self.comments[comment["id"]] = comment
                 self.comments_by_pr.setdefault(pr_id, []).append(comment["id"])

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,7 @@ def is_api_path(pathname: str) -> bool:
 
 
 def parse_scope(raw: Any) -> list[str]:
-    valid_scope = {"security", "style", "bugs", "performance"}
+    valid_scope = {"security", "bugs", "performance"}
     if not isinstance(raw, list) or len(raw) == 0:
         return ["bugs"]
 
@@ -57,6 +58,28 @@ def parse_scope(raw: Any) -> list[str]:
         raise HttpError(400, "validation_error", f"Unsupported scope value: {invalid}")
 
     return scope
+
+
+def resolve_generation_model(raw: Any) -> tuple[str, str]:
+    profile = str(raw or "yandexgpt-pro").strip() or "yandexgpt-pro"
+    folder_id = (os.getenv("RAG_YANDEX_FOLDER_ID") or "").strip()
+    fallback = (os.getenv("RAG_GENERATION_MODEL") or "").strip()
+
+    if not folder_id:
+        if fallback:
+            return profile, fallback
+        raise HttpError(500, "model_config_error", "RAG_YANDEX_FOLDER_ID is not configured")
+
+    allowed = {
+        "yandexgpt-pro": f"gpt://{folder_id}/yandexgpt/latest",
+        "yandexgpt-lite": f"gpt://{folder_id}/yandexgpt-lite",
+        "qwen3-235b": f"gpt://{folder_id}/qwen3-235b-a22b-fp8/latest",
+        "gpt-oss-120b": f"gpt://{folder_id}/gpt-oss-120b/latest",
+    }
+    model_uri = allowed.get(profile)
+    if not model_uri:
+        raise HttpError(400, "validation_error", f"Unsupported modelProfile value: {profile}")
+    return profile, model_uri
 
 
 def normalize_pr_state(value: Any) -> str:
@@ -90,7 +113,18 @@ def map_gitlab_file_status(item: dict[str, Any]) -> str:
 
 
 async def github_request(client: httpx.AsyncClient, token: str, url: str) -> Any:
-    response = await client.get(
+    return await github_api_request(client, token, "GET", url)
+
+
+async def github_api_request(
+    client: httpx.AsyncClient,
+    token: str,
+    method: str,
+    url: str,
+    payload: dict[str, Any] | None = None,
+) -> Any:
+    response = await client.request(
+        method,
         url,
         headers={
             "Authorization": f"Bearer {token}",
@@ -98,6 +132,7 @@ async def github_request(client: httpx.AsyncClient, token: str, url: str) -> Any
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "SWAGReviewer-Python",
         },
+        json=payload,
     )
 
     text = response.text
@@ -116,6 +151,122 @@ async def github_request(client: httpx.AsyncClient, token: str, url: str) -> Any
         )
 
     return data
+
+
+async def github_post(client: httpx.AsyncClient, token: str, url: str, payload: dict[str, Any]) -> Any:
+    return await github_api_request(client, token, "POST", url, payload)
+
+
+def build_github_comment_body(suggestion: dict[str, Any], mode: str) -> str:
+    confidence = suggestion.get("confidence")
+    confidence_text = "?"
+    if isinstance(confidence, (int, float)):
+        confidence_text = str(int(round(float(confidence) * 100)))
+
+    lines = [
+        f"**{str(suggestion.get('title') or '').strip()}**",
+        str(suggestion.get("body") or "").strip(),
+    ]
+    if mode == "issue_comments":
+        lines.append(
+            f"`{suggestion.get('filePath')}:{suggestion.get('lineStart')}-{suggestion.get('lineEnd')}`"
+        )
+    lines.append(
+        f"_Category: {suggestion.get('category')} · Severity: {suggestion.get('severity')} · Confidence: {confidence_text}%_"
+    )
+
+    citations = [
+        item for item in (suggestion.get("citations") or [])
+        if isinstance(item, dict) and item.get("url") and item.get("title")
+    ]
+    if citations:
+        lines.append("")
+        lines.append("References:")
+        for citation in citations[:2]:
+            lines.append(f"- [{citation['title']}]({citation['url']})")
+
+    return "\n\n".join([line for line in lines if line])
+
+
+def humanize_github_publish_error(error: HttpError, mode: str) -> str:
+    raw_message = error.message.removeprefix("GitHub API error: ").strip()
+    if error.status_code in {401, 403} and "personal access token" in raw_message.lower():
+        if mode == "issue_comments":
+            return "Токен не имеет прав на публикацию Conversation comments. Проверьте Issues: write или repo scope."
+        return "Токен не имеет прав на публикацию review comments. Проверьте Pull requests: write или repo scope."
+    if error.status_code == 404:
+        return "GitHub не дал доступ к этому PR или репозиторию. Обычно это неверный repo scope или токен не видит репозиторий."
+    if error.status_code == 422:
+        return f"GitHub не принял comment для текущего diff: {raw_message or 'invalid review comment payload'}"
+    return raw_message or error.message
+
+
+async def publish_github_comments(
+    client: httpx.AsyncClient,
+    token: str,
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    commit_sha: str,
+    mode: str,
+    suggestions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    comments: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    for suggestion in suggestions:
+        body = build_github_comment_body(suggestion, mode)
+        try:
+            if mode == "issue_comments":
+                payload = {"body": body}
+                response = await github_post(
+                    client,
+                    token,
+                    f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments",
+                    payload,
+                )
+            else:
+                line_start = int(suggestion.get("lineStart") or 1)
+                line_end = int(suggestion.get("lineEnd") or line_start)
+                payload = {
+                    "body": body,
+                    "commit_id": commit_sha,
+                    "path": str(suggestion.get("filePath") or ""),
+                    "line": line_end,
+                    "side": "RIGHT",
+                }
+                if line_start < line_end:
+                    payload["start_line"] = line_start
+                    payload["start_side"] = "RIGHT"
+                response = await github_post(
+                    client,
+                    token,
+                    f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments",
+                    payload,
+                )
+
+            if not isinstance(response, dict):
+                raise HttpError(502, "github_api_error", "GitHub API error: invalid publish response")
+
+            comments.append(
+                {
+                    "suggestionId": suggestion["id"],
+                    "providerCommentId": str(response.get("id") or ""),
+                    "state": "posted",
+                    "filePath": suggestion["filePath"],
+                    "lineStart": suggestion["lineStart"],
+                    "lineEnd": suggestion["lineEnd"],
+                    "body": body,
+                    "createdAt": response.get("created_at") or datetime_utc_iso(),
+                }
+            )
+        except HttpError as error:
+            errors.append(
+                f"{suggestion['filePath']}:{suggestion['lineStart']}: {humanize_github_publish_error(error, mode)}"
+            )
+
+    return comments, errors
 
 
 async def fetch_user_repos(client: httpx.AsyncClient, token: str) -> list[dict[str, Any]]:
@@ -756,6 +907,7 @@ def create_app(config: AppConfig) -> FastAPI:
             raise HttpError(400, "validation_error", "maxComments must be a positive number")
 
         scope = parse_scope(body.get("scope"))
+        model_profile, generation_model = resolve_generation_model(body.get("modelProfile"))
         files = [str(item) for item in body.get("files", [])] if isinstance(body.get("files"), list) else None
 
         job = await store.create_analysis_job(
@@ -765,6 +917,8 @@ def create_app(config: AppConfig) -> FastAPI:
                 "scope": scope,
                 "files": files,
                 "maxComments": max_comments,
+                "generationModelProfile": model_profile,
+                "generationModel": generation_model,
             },
         )
 
@@ -809,7 +963,54 @@ def create_app(config: AppConfig) -> FastAPI:
             raise HttpError(400, "validation_error", "mode must be review_comments or issue_comments")
 
         dry_run = bool(body.get("dryRun"))
-        result = store.publish(pr_id, job_id, mode, dry_run)
+        session_id = str(body.get("sessionId") or "").strip()
+
+        existing = store.get_publish_result(pr_id, job_id, mode, dry_run)
+        if existing:
+            return existing
+
+        if dry_run:
+            result = store.publish(pr_id, job_id, mode, dry_run)
+            return {
+                "publishRunId": result["publishRunId"],
+                "publishedCount": result["publishedCount"],
+                "errors": result["errors"],
+                "comments": result["comments"],
+                "idempotent": result["idempotent"],
+            }
+
+        pr = store.get_pr(pr_id)
+        repo = store.get_repo(pr["repoId"])
+        if repo.get("provider") != "github":
+            raise HttpError(501, "publish_not_supported", "Real publish is currently supported only for GitHub pull requests")
+        if not session_id:
+            raise HttpError(400, "validation_error", "sessionId is required for real GitHub publish")
+
+        session = github_sessions.get_for_provider(session_id, "github")
+        job = store.get_job(job_id)
+        snapshot = store.get_snapshot(job["snapshotId"])["snapshot"]
+        suggestions = store.get_publish_candidates(pr_id, job_id)
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            published_comments, errors = await publish_github_comments(
+                client,
+                session["token"],
+                owner=repo["owner"],
+                repo=repo["name"],
+                pr_number=pr["number"],
+                commit_sha=str(snapshot.get("commitSha") or pr["headSha"]),
+                mode=mode,
+                suggestions=suggestions,
+            )
+
+        result = store.publish(
+            pr_id,
+            job_id,
+            mode,
+            dry_run,
+            published_comments=published_comments,
+            errors=errors,
+        )
         return {
             "publishRunId": result["publishRunId"],
             "publishedCount": result["publishedCount"],

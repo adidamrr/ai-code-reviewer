@@ -31,10 +31,16 @@ from rag_ml.verifier import FindingVerifier
 
 
 class _FakeClient:
+    def __init__(self):
+        self.embed_calls = 0
+        self.model_checks: list[list[str]] = []
+
     async def ensure_models_available(self, models):
+        self.model_checks.append(list(models))
         return None
 
-    async def embed_texts(self, texts):
+    async def embed_texts(self, texts, *, model=None):
+        self.embed_calls += 1
         return [[0.1, 0.2, 0.3] for _ in texts]
 
     async def chat_structured(self, messages, schema, **kwargs):
@@ -171,8 +177,8 @@ class _FakeValidator:
 
 
 class _FakeRuntime:
-    def __init__(self):
-        self.client = _FakeClient()
+    def __init__(self, client=None):
+        self.client = client or _FakeClient()
         self.retriever = _FakeRetriever()
         self.generator = _FakeGenerator()
         self.citation_resolver = _FakeCitationResolver()
@@ -190,10 +196,18 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
             rag_root=REPO_ROOT / "rag-ml",
             kb_root=REPO_ROOT / "rag-ml" / "kb",
             build_root=REPO_ROOT / "rag-ml" / "build",
+            model_provider="ollama",
             ollama_base_url="http://127.0.0.1:11434",
+            model_api_base_url=None,
+            model_api_key=None,
+            yandex_base_url="https://llm.api.cloud.yandex.net/v1",
+            yandex_folder_id=None,
+            yandex_api_key=None,
             generation_model="qwen2.5-coder:7b",
             eval_generation_model="qwen2.5-coder:14b",
             embed_model="nomic-embed-text",
+            query_embed_model="nomic-embed-text",
+            enable_dense_retrieval=True,
             supported_languages=("dart",),
             primary_languages=("dart",),
             experimental_languages=(),
@@ -205,6 +219,7 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
             embed_batch_size=64,
             generation_max_tokens=256,
             ollama_timeout_seconds=30.0,
+            yandex_disable_data_logging=True,
             repair_model="gemma3:12b",
         )
         request = {
@@ -238,6 +253,130 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(suggestion["evidence"]), 1)
         self.assertTrue(suggestion["fingerprint"])
 
+    async def test_analyze_request_skips_embeddings_when_dense_disabled(self) -> None:
+        client = _FakeClient()
+        runtime = _FakeRuntime(client=client)
+        config = RagConfig(
+            repo_root=REPO_ROOT,
+            rag_root=REPO_ROOT / "rag-ml",
+            kb_root=REPO_ROOT / "rag-ml" / "kb",
+            build_root=REPO_ROOT / "rag-ml" / "build",
+            model_provider="api",
+            ollama_base_url="http://127.0.0.1:11434",
+            model_api_base_url="https://example.test/v1",
+            model_api_key="test-key",
+            yandex_base_url="https://llm.api.cloud.yandex.net/v1",
+            yandex_folder_id=None,
+            yandex_api_key=None,
+            generation_model="gemini-3-flash-preview",
+            eval_generation_model="gemini-3-flash-preview",
+            embed_model="gemini-embedding-2-preview",
+            query_embed_model="gemini-embedding-2-preview",
+            enable_dense_retrieval=False,
+            supported_languages=("dart",),
+            primary_languages=("dart",),
+            experimental_languages=(),
+            enable_security=False,
+            enable_performance=True,
+            default_topk=6,
+            max_hunks_per_file=2,
+            max_hotspot_tasks=8,
+            embed_batch_size=64,
+            generation_max_tokens=256,
+            ollama_timeout_seconds=30.0,
+            yandex_disable_data_logging=True,
+            repair_model="gemini-3-flash-preview",
+        )
+        request = {
+            "jobId": "job_1",
+            "prId": "pr_1",
+            "snapshotId": "snap_1",
+            "title": "Refactor auth flow",
+            "scope": ["style"],
+            "files": [
+                {
+                    "path": "lib/example.dart",
+                    "language": "Dart",
+                    "patch": "@@ -1 +1 @@\n+final My_var = 1;",
+                    "hunks": [],
+                    "lineMap": [],
+                    "surroundingCode": [{"lineNumber": 1, "text": "final My_var = 1;"}],
+                }
+            ],
+            "limits": {"maxComments": 5, "maxPerFile": 3},
+        }
+
+        with patch("rag_ml.service.load_config", return_value=config), patch("rag_ml.service._load_runtime", return_value=runtime):
+            result = await analyze_request(request)
+
+        self.assertEqual(result["partialFailures"], 0)
+        self.assertEqual(client.embed_calls, 0)
+        self.assertEqual(client.model_checks, [["gemini-3-flash-preview"]])
+
+    async def test_runtime_status_allows_sparse_only_artifacts_when_dense_disabled(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            build_root = Path(tmpdir)
+            (build_root / "chunks").mkdir(parents=True, exist_ok=True)
+            (build_root / "sparse").mkdir(parents=True, exist_ok=True)
+            (build_root / "dense").mkdir(parents=True, exist_ok=True)
+            (build_root / "build-manifest.json").write_text(
+                BuildManifest(
+                    generatedAt="2026-01-01T00:00:00Z",
+                    embeddingModel="gemini-embedding-2-preview",
+                    denseRetrievalEnabled=False,
+                    namespaces=[
+                        BuildNamespaceMeta(namespace="dart", documents=1, chunks=2, ready=True, primary=True),
+                    ],
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+            for relative in (
+                "chunks/dart.chunks.jsonl",
+                "sparse/dart.bm25.pkl",
+            ):
+                (build_root / relative).write_text("ok", encoding="utf-8")
+
+            config = RagConfig(
+                repo_root=REPO_ROOT,
+                rag_root=REPO_ROOT / "rag-ml",
+                kb_root=REPO_ROOT / "rag-ml" / "kb",
+                build_root=build_root,
+                model_provider="api",
+                ollama_base_url="http://127.0.0.1:11434",
+                model_api_base_url="https://example.test/v1",
+                model_api_key="test-key",
+                yandex_base_url="https://llm.api.cloud.yandex.net/v1",
+                yandex_folder_id=None,
+                yandex_api_key=None,
+                generation_model="gemini-3-flash-preview",
+                eval_generation_model="gemini-3-flash-preview",
+                embed_model="gemini-embedding-2-preview",
+                query_embed_model="gemini-embedding-2-preview",
+                enable_dense_retrieval=False,
+                supported_languages=("dart",),
+                primary_languages=("dart",),
+                experimental_languages=(),
+                enable_security=False,
+                enable_performance=True,
+                default_topk=6,
+                max_hunks_per_file=2,
+                max_hotspot_tasks=8,
+                embed_batch_size=64,
+                generation_max_tokens=256,
+                ollama_timeout_seconds=30.0,
+                yandex_disable_data_logging=True,
+                repair_model="gemini-3-flash-preview",
+            )
+            client = _FakeClient()
+
+            with patch("rag_ml.service.load_config", return_value=config), patch("rag_ml.service.create_model_client", return_value=client):
+                result = await runtime_status()
+
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["missingArtifacts"], [])
+        self.assertFalse(result["denseRetrievalEnabled"])
+        self.assertEqual(client.model_checks, [["gemini-3-flash-preview"]])
+
     async def test_runtime_status_reports_missing_primary_artifacts(self) -> None:
         with TemporaryDirectory() as tmpdir:
             build_root = Path(tmpdir)
@@ -267,10 +406,18 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
                 rag_root=REPO_ROOT / "rag-ml",
                 kb_root=REPO_ROOT / "rag-ml" / "kb",
                 build_root=build_root,
+                model_provider="ollama",
                 ollama_base_url="http://127.0.0.1:11434",
+                model_api_base_url=None,
+                model_api_key=None,
+                yandex_base_url="https://llm.api.cloud.yandex.net/v1",
+                yandex_folder_id=None,
+                yandex_api_key=None,
                 generation_model="qwen2.5-coder:7b",
                 eval_generation_model="qwen2.5-coder:14b",
                 embed_model="nomic-embed-text",
+                query_embed_model="nomic-embed-text",
+                enable_dense_retrieval=True,
                 supported_languages=("dart", "python"),
                 primary_languages=("dart", "python"),
                 experimental_languages=(),
@@ -282,9 +429,10 @@ class RagServiceContractTests(unittest.IsolatedAsyncioTestCase):
                 embed_batch_size=64,
                 generation_max_tokens=256,
                 ollama_timeout_seconds=30.0,
+                yandex_disable_data_logging=True,
             )
 
-            with patch("rag_ml.service.load_config", return_value=config), patch("rag_ml.service.OllamaClient", return_value=_FakeClient()):
+            with patch("rag_ml.service.load_config", return_value=config), patch("rag_ml.service.create_model_client", return_value=_FakeClient()):
                 result = await runtime_status()
 
         self.assertFalse(result["ready"])

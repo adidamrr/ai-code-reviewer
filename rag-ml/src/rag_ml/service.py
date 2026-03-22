@@ -22,7 +22,7 @@ from .kb_chunker import chunk_documents
 from .kb_inventory import build_inventory, write_inventory
 from .kb_loader import collect_document_descriptors
 from .kb_normalizer import normalize_descriptor
-from .ollama_client import OllamaClient, OllamaError
+from .model_client import ModelClientError, create_model_client
 from .query_builder import build_query
 from .ranking import build_ranked_suggestion, dedupe_and_rank, fingerprint_for_suggestion
 from .schemas import (
@@ -39,7 +39,6 @@ from .schemas import (
 )
 from .sparse_index import build_sparse_index, load_sparse_index
 from .static_signals import collect_static_signals
-from .style_rules import rule_based_style_candidates
 from .synthesizer import synthesize_suggestions
 from .validator import SuggestionValidator
 from .verifier import FindingVerifier
@@ -93,6 +92,11 @@ def _clear_namespace_artifacts(config: RagConfig, namespace: str) -> None:
     _remove_if_exists(_dense_meta_path(config, namespace))
 
 
+def _clear_dense_artifacts(config: RagConfig, namespace: str) -> None:
+    _remove_if_exists(_dense_vector_path(config, namespace))
+    _remove_if_exists(_dense_meta_path(config, namespace))
+
+
 def _load_existing_build_manifest(config: RagConfig) -> BuildManifest | None:
     path = _build_manifest_path(config)
     if not path.exists():
@@ -134,6 +138,26 @@ def _merge_hits(hit_groups: list[list], *, top_k: int) -> list:
     return sorted(best_by_chunk.values(), key=lambda item: item.finalScore, reverse=True)[:top_k]
 
 
+def _required_runtime_models(
+    config: RagConfig,
+    *,
+    generation_model: str | None = None,
+    repair_model: str | None = None,
+) -> list[str]:
+    required_models: list[str] = []
+    if config.enable_dense_retrieval:
+        required_models.append(config.embed_model)
+        if config.query_embed_model not in required_models:
+            required_models.append(config.query_embed_model)
+    effective_generation_model = generation_model or config.generation_model
+    effective_repair_model = repair_model or config.repair_model or effective_generation_model
+    if effective_generation_model not in required_models:
+        required_models.append(effective_generation_model)
+    if effective_repair_model and effective_repair_model not in required_models:
+        required_models.append(effective_repair_model)
+    return required_models
+
+
 async def _emit_progress(
     callback: Callable[[dict[str, Any]], Any] | None,
     update: ProgressUpdate,
@@ -146,7 +170,7 @@ async def _emit_progress(
 
 
 def _effective_scope(config: RagConfig, request: RagRequest) -> set[str]:
-    requested_scope = {scope for scope in request.scope if scope in {"security", "bugs", "style", "performance"}}
+    requested_scope = {scope for scope in request.scope if scope in {"security", "bugs", "performance"}}
     if not config.enable_security and "security" in requested_scope:
         requested_scope.remove("security")
     if not config.enable_performance and "performance" in requested_scope:
@@ -187,7 +211,7 @@ class RagRuntime:
                 self.sparse_by_namespace[namespace] = load_sparse_index(sparse_path)
             if dense_path.exists() and dense_meta.exists():
                 self.dense_by_namespace[namespace] = load_dense_index(dense_path, dense_meta)
-        self.client = OllamaClient(config)
+        self.client = create_model_client(config)
         self.retriever = HybridRetriever(chunks_by_id, self.sparse_by_namespace, self.dense_by_namespace)
         self.generator = SuggestionGenerator(self.client)
         self.citation_resolver = CitationResolver(chunks_by_id)
@@ -195,7 +219,11 @@ class RagRuntime:
         self.verifier = FindingVerifier()
 
     def has_namespace(self, namespace: str) -> bool:
-        return namespace in self.sparse_by_namespace and namespace in self.dense_by_namespace
+        if namespace not in self.sparse_by_namespace:
+            return False
+        if self.config.enable_dense_retrieval:
+            return namespace in self.dense_by_namespace
+        return True
 
 
 _RUNTIME: RagRuntime | None = None
@@ -229,8 +257,14 @@ async def build_artifacts(config: RagConfig, namespaces: set[str] | None = None)
     for descriptor in descriptors:
         grouped[descriptor.namespace].append(descriptor)
 
-    client = OllamaClient(config)
-    await client.ensure_models_available([config.embed_model])
+    client = create_model_client(config)
+
+    required_models: list[str] = []
+    if config.enable_dense_retrieval:
+        required_models.append(config.embed_model)
+    if required_models:
+        await client.ensure_models_available(required_models)
+
     for namespace_item in inventory:
         if namespaces and namespace_item.namespace not in namespaces:
             continue
@@ -245,12 +279,15 @@ async def build_artifacts(config: RagConfig, namespaces: set[str] | None = None)
             chunk_path = _chunk_path(config, namespace_item.namespace)
             write_chunks(chunk_path, chunks)
             build_sparse_index(chunks, _sparse_path(config, namespace_item.namespace))
-            await build_dense_index(
-                chunks,
-                _dense_vector_path(config, namespace_item.namespace),
-                _dense_meta_path(config, namespace_item.namespace),
-                client,
-            )
+            if config.enable_dense_retrieval:
+                await build_dense_index(
+                    chunks,
+                    _dense_vector_path(config, namespace_item.namespace),
+                    _dense_meta_path(config, namespace_item.namespace),
+                    client,
+                )
+            else:
+                _clear_dense_artifacts(config, namespace_item.namespace)
         else:
             _clear_namespace_artifacts(config, namespace_item.namespace)
         merged_meta[namespace_item.namespace] = (
@@ -267,6 +304,8 @@ async def build_artifacts(config: RagConfig, namespaces: set[str] | None = None)
     manifest = BuildManifest(
         generatedAt=now_iso(),
         embeddingModel=config.embed_model,
+        queryEmbeddingModel=config.query_embed_model if config.query_embed_model != config.embed_model else None,
+        denseRetrievalEnabled=config.enable_dense_retrieval,
         namespaces=sorted(merged_meta.values(), key=lambda item: item.namespace),
     )
     config.build_root.mkdir(parents=True, exist_ok=True)
@@ -287,9 +326,15 @@ async def runtime_status() -> dict[str, Any]:
         "enabled": True,
         "ready": False,
         "buildRoot": str(config.build_root),
+        "modelProvider": config.model_provider,
         "embeddingModel": config.embed_model,
+        "queryEmbeddingModel": config.query_embed_model,
+        "denseRetrievalEnabled": config.enable_dense_retrieval,
         "generationModel": config.generation_model,
         "repairModel": config.repair_model,
+        "modelApiBaseUrl": config.model_api_base_url,
+        "yandexBaseUrl": config.yandex_base_url if config.model_provider == "yandex" else None,
+        "yandexFolderId": config.yandex_folder_id if config.model_provider == "yandex" else None,
         "requiredNamespaces": required_namespaces,
         "builtNamespaces": [],
         "missingArtifacts": [],
@@ -310,23 +355,23 @@ async def runtime_status() -> dict[str, Any]:
         if meta is None or not meta.ready:
             missing_artifacts.append(namespace)
             continue
-        required_paths = (
+        required_paths = [
             _chunk_path(config, namespace),
             _sparse_path(config, namespace),
-            _dense_vector_path(config, namespace),
-            _dense_meta_path(config, namespace),
-        )
+        ]
+        if config.enable_dense_retrieval:
+            required_paths.extend((
+                _dense_vector_path(config, namespace),
+                _dense_meta_path(config, namespace),
+            ))
         if any(not path.exists() for path in required_paths):
             missing_artifacts.append(namespace)
     status["missingArtifacts"] = missing_artifacts
 
-    client = OllamaClient(config)
+    client = create_model_client(config)
     try:
-        required_models = [config.embed_model, config.generation_model]
-        if config.repair_model and config.repair_model not in required_models:
-            required_models.append(config.repair_model)
-        await client.ensure_models_available(required_models)
-    except OllamaError as error:
+        await client.ensure_models_available(_required_runtime_models(config))
+    except ModelClientError as error:
         status["message"] = str(error)
         return status
 
@@ -350,10 +395,15 @@ async def analyze_request(
     config = load_config()
     request = RagRequest.model_validate(raw_request)
     runtime = _load_runtime(config)
-    required_models = [config.embed_model, config.generation_model]
-    if config.repair_model and config.repair_model not in required_models:
-        required_models.append(config.repair_model)
-    await runtime.client.ensure_models_available(required_models)
+    generation_model = request.generationModel or config.generation_model
+    repair_model = request.repairModel or config.repair_model or generation_model
+    await runtime.client.ensure_models_available(
+        _required_runtime_models(
+            config,
+            generation_model=generation_model,
+            repair_model=repair_model,
+        )
+    )
     requested_scope = _effective_scope(config, request)
     if not requested_scope:
         return RagResponse(suggestions=[], partialFailures=0, meta={}).model_dump()
@@ -369,7 +419,7 @@ async def analyze_request(
             filesTotal=len(request.files),
         ),
     )
-    overview = await build_pr_overview(runtime.client, request)
+    overview = await build_pr_overview(runtime.client, request, model=generation_model)
     await _emit_progress(
         progress_callback,
         ProgressUpdate(
@@ -584,7 +634,12 @@ async def analyze_request(
                 if category == "security" and config.enable_security and runtime.has_namespace("security-pack"):
                     namespaces.append("security-pack")
                 query_text = build_query(task, category)
-                query_vector = np.asarray((await runtime.client.embed_texts([query_text]))[0], dtype=np.float32)
+                query_vector = None
+                if config.enable_dense_retrieval:
+                    query_vector = np.asarray(
+                        (await runtime.client.embed_texts([query_text], model=config.query_embed_model))[0],
+                        dtype=np.float32,
+                    )
                 hits = runtime.retriever.search(namespaces, query_text, query_vector, top_k=config.default_topk)
                 if hits:
                     hits_by_category[category] = hits
@@ -595,9 +650,6 @@ async def analyze_request(
             score_by_chunk = {hit.chunkId: hit.finalScore for hit in merged_hits}
             accepted_any = False
             deterministic_candidates: list[CandidateFinding] = []
-            if "style" in active_categories:
-                style_hits = hits_by_category.get("style", [])
-                deterministic_candidates.extend(rule_based_style_candidates(task, style_hits))
             if any(category in active_categories for category in ("bugs", "security")):
                 deterministic_candidates.extend(rule_based_bug_candidates(task, signals))
             debug["ruleCandidates"] = len(deterministic_candidates)
@@ -624,6 +676,8 @@ async def analyze_request(
                         task,
                         active_categories,
                         context_pack,
+                        generation_model=generation_model,
+                        repair_model=repair_model,
                         max_findings=max_suggestions,
                     )
                 except Exception as error:
@@ -651,7 +705,12 @@ async def analyze_request(
                         if not verification.valid:
                             debug["rejected"][verification.reason or "verification_failed"] += 1
                             continue
-                        explained = await runtime.generator.explain(task, outline, context_pack)
+                        explained = await runtime.generator.explain(
+                            task,
+                            outline,
+                            context_pack,
+                            generation_model=generation_model,
+                        )
                         if append_ranked_candidate(
                             explained,
                             task=task,

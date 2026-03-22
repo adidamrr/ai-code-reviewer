@@ -1,11 +1,131 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ApiClient } from "../lib/api";
-import { useAppStore, ALL_SCOPES, JOB_STAGE_LABELS, JOB_STATUS_LABELS, SCOPE_LABELS, SEVERITY_LABELS, STEP_LABELS, WORKSPACE_STEPS } from "../store/app-store";
-import type { Suggestion } from "../types";
+import {
+  useAppStore,
+  ANALYSIS_SCOPES,
+  GENERATION_MODEL_OPTIONS,
+  JOB_STAGE_LABELS,
+  JOB_STATUS_LABELS,
+  SCOPE_LABELS,
+  SEVERITY_LABELS,
+  STEP_LABELS,
+  WORKSPACE_STEPS,
+} from "../store/app-store";
+import type { Evidence, Suggestion } from "../types";
+
+type EvidenceMeta = Evidence["metadata"] & {
+  headingPath?: unknown;
+  docPath?: unknown;
+  symbol?: unknown;
+  contextWindow?: unknown;
+};
+
+interface EvidenceWindowLine {
+  lineNumber: number;
+  text: string;
+  kind: "add" | "ctx" | "del";
+  highlight?: boolean;
+}
+
+function getEvidenceMetadata(item: Evidence): EvidenceMeta {
+  return (item.metadata ?? {}) as EvidenceMeta;
+}
+
+function buildEvidenceLabel(item: Evidence): string {
+  if (item.type === "code") {
+    return `Код: ${item.title}`;
+  }
+  if (item.type === "doc") {
+    return `KB: ${item.title}`;
+  }
+  if (item.type === "rule") {
+    return `Правило: ${item.title}`;
+  }
+  return `${item.type}: ${item.title}`;
+}
+
+function buildEvidenceLocation(item: Evidence): string | null {
+  if (item.filePath) {
+    return `${item.filePath}:${item.lineStart ?? "?"}-${item.lineEnd ?? item.lineStart ?? "?"}`;
+  }
+
+  const metadata = getEvidenceMetadata(item);
+  const headingPath = Array.isArray(metadata.headingPath)
+    ? metadata.headingPath.filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+    : [];
+  const docPath = typeof metadata.docPath === "string" && metadata.docPath.trim().length > 0
+    ? metadata.docPath
+    : null;
+
+  if (headingPath.length > 0 && docPath) {
+    return `${headingPath.join(" › ")} · ${docPath}`;
+  }
+  if (headingPath.length > 0) {
+    return headingPath.join(" › ");
+  }
+  if (docPath) {
+    return docPath;
+  }
+  if (item.sourceId) {
+    return item.sourceId;
+  }
+
+  return null;
+}
+
+function buildEvidenceSnippet(item: Evidence): string {
+  return item.snippet.replace(/\r\n/g, "\n").trim();
+}
+
+function getEvidenceWindow(item: Evidence): EvidenceWindowLine[] {
+  const metadata = getEvidenceMetadata(item);
+  if (!Array.isArray(metadata.contextWindow)) {
+    return [];
+  }
+
+  return metadata.contextWindow.flatMap((rawLine) => {
+    if (!rawLine || typeof rawLine !== "object") {
+      return [];
+    }
+
+    const candidate = rawLine as Record<string, unknown>;
+    const lineNumber = Number(candidate.lineNumber);
+    const text = typeof candidate.text === "string" ? candidate.text : "";
+    const rawKind = candidate.kind === "add" || candidate.kind === "del" ? candidate.kind : "ctx";
+
+    if (!Number.isFinite(lineNumber)) {
+      return [];
+    }
+
+    return [{
+      lineNumber,
+      text,
+      kind: rawKind,
+      highlight: candidate.highlight === true,
+    }];
+  });
+}
+
+function isEvidenceFocusLine(
+  line: EvidenceWindowLine,
+  item: Evidence,
+  activeSuggestion: Suggestion,
+): boolean {
+  if (item.filePath && item.filePath === activeSuggestion.filePath) {
+    return line.lineNumber >= activeSuggestion.lineStart && line.lineNumber <= activeSuggestion.lineEnd;
+  }
+
+  if (item.lineStart !== null && item.lineStart !== undefined) {
+    const end = item.lineEnd ?? item.lineStart;
+    return line.lineNumber >= item.lineStart && line.lineNumber <= end;
+  }
+
+  return line.highlight === true;
+}
 
 export function RepoWorkspacePage() {
-  const { repoId } = useParams<{ repoId: string }>();
+  const { repoId, prNumber } = useParams<{ repoId: string; prNumber?: string }>();
   const navigate = useNavigate();
   const {
     session,
@@ -16,6 +136,7 @@ export function RepoWorkspacePage() {
     actions,
     canOpenStep,
     getWorkflow,
+    getRepoBrowser,
   } = useAppStore();
   const api = useMemo(
     () =>
@@ -27,6 +148,7 @@ export function RepoWorkspacePage() {
   );
 
   const repo = useMemo(() => repos.find((item) => item.repoId === repoId) ?? null, [repoId, repos]);
+  const repoBrowser = getRepoBrowser(repoId);
   const workflow = getWorkflow(repoId);
   const prLabel = session?.provider === "gitlab" ? "MR" : "PR";
   const [patchByFile, setPatchByFile] = useState<Record<string, string>>({});
@@ -39,6 +161,32 @@ export function RepoWorkspacePage() {
     }
     actions.selectRepo(repoId);
   }, [actions, repoId]);
+
+  useEffect(() => {
+    if (!repoId || !repoBrowser || repoBrowser.prs.length > 0) {
+      return;
+    }
+    actions.loadPullRequests(repoId).catch(() => undefined);
+  }, [actions, repoBrowser, repoId]);
+
+  useEffect(() => {
+    if (!repoId || !prNumber) {
+      return;
+    }
+
+    const parsed = Number(prNumber);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+
+    actions.selectPullRequest(repoId, parsed);
+  }, [actions, prNumber, repoId]);
+
+  useEffect(() => {
+    setPatchByFile({});
+    setPatchLoading(false);
+    setPatchError(null);
+  }, [repoId, repoBrowser?.selectedPrNumber]);
 
   useEffect(() => {
     if (!repoId || !workflow?.job || workflow.jobBooting) {
@@ -92,8 +240,8 @@ export function RepoWorkspacePage() {
     );
   }
 
-  const filteredPrs = workflow.prs.filter((pr) => {
-    const q = workflow.prSearch.trim().toLowerCase();
+  const filteredPrs = (repoBrowser?.prs ?? []).filter((pr) => {
+    const q = repoBrowser?.prSearch.trim().toLowerCase() ?? "";
     if (!q) {
       return true;
     }
@@ -135,6 +283,8 @@ export function RepoWorkspacePage() {
 
   const inlineSuggestions = filteredSuggestions.filter((item) => (item.deliveryMode ?? "inline") === "inline");
   const summarySuggestions = filteredSuggestions.filter((item) => item.deliveryMode === "summary");
+  const hasNoModelFindings = workflow.job?.status === "done" && workflow.suggestions.length === 0;
+  const hasNoVisibleSuggestions = filteredSuggestions.length === 0;
 
   const severityCounts = useMemo(() => ({
     critical: suggestionsForSeverityCounts.filter((item) => item.severity === "critical").length,
@@ -170,10 +320,12 @@ export function RepoWorkspacePage() {
   }, [inlineSuggestions]);
 
   const selectedVisibleCount = filteredSuggestions.filter((item) => workflow.selectedSuggestionIds.includes(item.id)).length;
-  const enabledScopes = ALL_SCOPES.filter((item) => workflow.scope[item]);
   const bootStartedLabel = workflow.jobBootStartedAt
     ? new Date(workflow.jobBootStartedAt).toLocaleTimeString("ru-RU")
     : null;
+  const selectedPrNumber = repoBrowser?.selectedPrNumber ?? null;
+  const analyzeTitle = selectedPrNumber ? `Analyze ${prLabel} #${selectedPrNumber}` : `Analyze ${prLabel}`;
+  const selectedModel = GENERATION_MODEL_OPTIONS.find((option) => option.id === workflow.generationModelProfile) ?? GENERATION_MODEL_OPTIONS[0];
 
   const activeSuggestion =
     filteredSuggestions.find((item) => item.id === workflow.activeSuggestionId) ??
@@ -242,7 +394,7 @@ export function RepoWorkspacePage() {
           <p className="eyebrow">Repo Workspace</p>
           <h1>{repo.fullName}</h1>
           <p className="subline">
-            {prLabel}: {workflow.selectedPrNumber ? `#${workflow.selectedPrNumber}` : "не выбран"} ·
+            {prLabel}: {repoBrowser?.selectedPrNumber ? `#${repoBrowser.selectedPrNumber}` : "не выбран"} ·
             {" "}
             Snapshot: {workflow.syncData?.snapshotId ?? "нет"}
           </p>
@@ -272,150 +424,122 @@ export function RepoWorkspacePage() {
       </section>
 
       {workflow.activeStep === "pr" ? (
-        <section className="card stack-gap">
-          <div className="toolbar-row">
-            <select
-              value={workflow.prState}
-              onChange={(event) => actions.setPrState(repo.repoId, event.target.value as "open" | "closed" | "all")}
-            >
-              <option value="open">open</option>
-              <option value="closed">closed</option>
-              <option value="all">all</option>
-            </select>
-            <input
-              value={workflow.prSearch}
-              onChange={(event) => actions.setPrSearch(repo.repoId, event.target.value)}
-              placeholder={`Поиск ${prLabel}`}
-            />
-            <button className="secondary-btn" onClick={() => actions.loadPullRequests(repo.repoId)} disabled={busy}>
-              Загрузить список PR/MR
-            </button>
+        <section className="card pr-review-shell">
+          <div className="stack-gap">
+            <div className="toolbar-row">
+              <select
+                value={repoBrowser?.prState ?? "open"}
+                onChange={(event) => actions.setPrState(repo.repoId, event.target.value as "open" | "closed" | "all")}
+              >
+                <option value="open">open</option>
+                <option value="closed">closed</option>
+                <option value="all">all</option>
+              </select>
+              <input
+                value={repoBrowser?.prSearch ?? ""}
+                onChange={(event) => actions.setPrSearch(repo.repoId, event.target.value)}
+                placeholder={`Поиск ${prLabel}`}
+              />
+              <button className="secondary-btn" onClick={() => actions.loadPullRequests(repo.repoId)} disabled={busy}>
+                Обновить список {prLabel}
+              </button>
+            </div>
+
+            <div className="pr-list">
+              {filteredPrs.map((pr) => {
+                const selected = repoBrowser?.selectedPrNumber === pr.number;
+
+                return (
+                  <button
+                    key={pr.number}
+                    className={`pr-item ${selected ? "active" : ""}`}
+                    onClick={() => {
+                      actions.selectPullRequest(repo.repoId, pr.number);
+                      navigate(`/repos/${repo.repoId}/reviews/${pr.number}`);
+                    }}
+                  >
+                    <div className="pr-title-line">
+                      <strong>#{pr.number}</strong>
+                      <span>{pr.title}</span>
+                    </div>
+                    <p className="pr-meta">
+                      {pr.authorLogin} · {pr.state} · обновлено {new Date(pr.updatedAt).toLocaleString("ru-RU")}
+                    </p>
+                  </button>
+                );
+              })}
+
+              {filteredPrs.length === 0 ? (
+                <p className="empty-note">PR пока не загружены. Нажми «Обновить список PR/MR».</p>
+              ) : null}
+            </div>
           </div>
 
-          <div className="pr-list">
-            {filteredPrs.map((pr) => {
-              const selected = workflow.selectedPrNumber === pr.number;
+          <aside className="sync-inline-card analyze-pr-card">
+            <div className="sync-inline-head">
+              <h3>{analyzeTitle}</h3>
+            </div>
 
-              return (
-                <button
-                  key={pr.number}
-                  className={`pr-item ${selected ? "active" : ""}`}
-                  onClick={() => actions.selectPullRequest(repo.repoId, pr.number)}
-                >
-                  <div className="pr-title-line">
-                    <strong>#{pr.number}</strong>
-                    <span>{pr.title}</span>
-                  </div>
-                  <p className="pr-meta">
-                    {pr.authorLogin} · {pr.state} · обновлено {new Date(pr.updatedAt).toLocaleString("ru-RU")}
-                  </p>
-                </button>
-              );
-            })}
-
-            {filteredPrs.length === 0 ? (
-              <p className="empty-note">PR пока не загружены. Нажми «Загрузить список PR/MR».</p>
-            ) : null}
-          </div>
-
-          <div className="row-actions">
-            <div className="sync-inline-card">
-              <div className="sync-inline-head">
-                <h3>Синхронизация PR/MR</h3>
-                <p className="subline">После sync сразу открываются параметры анализа.</p>
+            <div className="analysis-control-layout">
+              <div className="analysis-control-copy">
+                <p className="analysis-control-label">Выберите параметры</p>
+                <label className="field analysis-model-field">
+                  <span>Модель анализа</span>
+                  <select
+                    value={workflow.generationModelProfile}
+                    onChange={(event) => actions.setGenerationModelProfile(repo.repoId, event.target.value as typeof workflow.generationModelProfile)}
+                  >
+                    {GENERATION_MODEL_OPTIONS.map((option) => (
+                      <option key={option.id} value={option.id}>{option.label}</option>
+                    ))}
+                  </select>
+                  <small>{selectedModel.description}</small>
+                </label>
+                <div className="chips-row">
+                  {ANALYSIS_SCOPES.map((scope) => (
+                    <button
+                      key={scope}
+                      className={`chip ${workflow.scope[scope] ? "active" : ""}`}
+                      onClick={() => actions.toggleScope(repo.repoId, scope)}
+                    >
+                      {SCOPE_LABELS[scope]}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div className="row-actions">
+
+              <div className="analysis-control-actions">
                 <button
                   className="primary-btn"
-                  disabled={!workflow.selectedPrNumber || busy}
-                  onClick={() => actions.syncPullRequest(repo.repoId)}
+                  disabled={!selectedPrNumber || busy}
+                  onClick={() => {
+                    if (selectedPrNumber) {
+                      navigate(`/repos/${repo.repoId}/reviews/${selectedPrNumber}`);
+                    }
+                    actions.analyzePullRequest(repo.repoId).catch(() => undefined);
+                  }}
                 >
-                  Синхронизировать #{workflow.selectedPrNumber ?? "?"}
+                  Analyze {prLabel}
                 </button>
-                {workflow.syncData ? (
-                  <button className="secondary-btn" onClick={() => actions.setActiveStep(repo.repoId, "params")}>
-                    К параметрам
+                {workflow.job ? (
+                  <button className="secondary-btn" onClick={() => actions.setActiveStep(repo.repoId, "job")}>
+                    Открыть job
                   </button>
                 ) : null}
               </div>
-
-              {workflow.syncData ? (
-                <div className="sync-inline-metrics">
-                  <span>snapshot: {workflow.syncData.snapshotId}</span>
-                  <span>files: {workflow.syncData.counts.files}</span>
-                  <span>+/-: {workflow.syncData.counts.additions}/{workflow.syncData.counts.deletions}</span>
-                  <span>idempotent: {String(workflow.syncData.idempotent)}</span>
-                </div>
-              ) : (
-                <p className="empty-note">Выбери PR/MR и запусти синхронизацию.</p>
-              )}
             </div>
-          </div>
-        </section>
-      ) : null}
 
-      {workflow.activeStep === "params" ? (
-        <section className="card stack-gap">
-          <h2>Параметры анализа</h2>
-          <div className="chips-row">
-            {ALL_SCOPES.map((scope) => (
-              <button
-                key={scope}
-                className={`chip ${workflow.scope[scope] ? "active" : ""}`}
-                onClick={() => actions.toggleScope(repo.repoId, scope)}
-              >
-                {SCOPE_LABELS[scope]}
-              </button>
-            ))}
-          </div>
-
-          <div className="form-grid">
-            <label className="field">
-              <span>Максимум комментариев</span>
-              <input
-                type="number"
-                value={workflow.maxComments}
-                min={1}
-                max={500}
-                onChange={(event) => actions.setMaxComments(repo.repoId, Number(event.target.value))}
-              />
-            </label>
-
-            <label className="field">
-              <span>Минимальная severity (UI-only)</span>
-              <select
-                value={workflow.minSeverity}
-                onChange={(event) =>
-                  actions.setMinSeverity(
-                    repo.repoId,
-                    event.target.value as "none" | "low" | "medium" | "high" | "critical" | "info",
-                  )
-                }
-              >
-                <option value="none">без фильтра</option>
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-                <option value="critical">critical</option>
-              </select>
-            </label>
-          </div>
-
-          <label className="field">
-            <span>File filter (UI-only, mock)</span>
-            <input
-              value={workflow.fileFilter}
-              onChange={(event) => actions.setFileFilter(repo.repoId, event.target.value)}
-              placeholder="*.ts, !tests/**"
-            />
-          </label>
-
-          <div className="row-actions">
-            <button className="primary-btn" onClick={() => actions.createAnalysisJob(repo.repoId)} disabled={busy || !workflow.syncData}>
-              Запустить анализ
-            </button>
-            <button className="secondary-btn" onClick={() => actions.setActiveStep(repo.repoId, "pr")}>Назад к PR/MR</button>
-          </div>
+            {workflow.syncData ? (
+              <div className="sync-inline-metrics">
+                <span>snapshot: {workflow.syncData.snapshotId}</span>
+                <span>files: {workflow.syncData.counts.files}</span>
+                <span>+/-: {workflow.syncData.counts.additions}/{workflow.syncData.counts.deletions}</span>
+                <span>idempotent: {String(workflow.syncData.idempotent)}</span>
+              </div>
+            ) : (
+              <p className="empty-note">Выбери {prLabel} и запусти Analyze {prLabel}.</p>
+            )}
+          </aside>
         </section>
       ) : null}
 
@@ -459,11 +583,15 @@ export function RepoWorkspacePage() {
                 </article>
                 <article className="kpi-card">
                   <span>области анализа</span>
-                  <strong>{enabledScopes.map((scope) => SCOPE_LABELS[scope]).join(", ")}</strong>
+                  <strong>{ANALYSIS_SCOPES.filter((scope) => workflow.scope[scope]).map((scope) => SCOPE_LABELS[scope]).join(", ")}</strong>
                 </article>
                 <article className="kpi-card">
                   <span>max comments</span>
                   <strong>{workflow.maxComments}</strong>
+                </article>
+                <article className="kpi-card">
+                  <span>model</span>
+                  <strong>{selectedModel.label}</strong>
                 </article>
                 <article className="kpi-card">
                   <span>старт</span>
@@ -523,7 +651,6 @@ export function RepoWorkspacePage() {
 
               <div className="row-actions">
                 <button className="secondary-btn" onClick={() => actions.refreshJob(repo.repoId)} disabled={busy}>Обновить job</button>
-                <button className="secondary-btn" onClick={() => actions.loadJobEvents(repo.repoId)} disabled={busy}>Обновить события</button>
                 {workflow.job.status === "queued" || workflow.job.status === "running" ? (
                   <button className="secondary-btn danger" onClick={() => actions.cancelJob(repo.repoId)} disabled={busy}>Отменить</button>
                 ) : null}
@@ -545,7 +672,7 @@ export function RepoWorkspacePage() {
               </div>
             </>
           ) : (
-            <p className="empty-note">Сначала создай задачу анализа на шаге параметров.</p>
+            <p className="empty-note">Сначала запусти Analyze PR на предыдущем экране.</p>
           )}
         </section>
       ) : null}
@@ -612,12 +739,6 @@ export function RepoWorkspacePage() {
                     onClick={() => actions.setSuggestionCategoryFilter(repo.repoId, "bugs")}
                   >
                     {SCOPE_LABELS.bugs} ({categoryCounts.bugs})
-                  </button>
-                  <button
-                    className={`severity-filter-chip category style ${workflow.suggestionCategoryFilter === "style" ? "active" : ""}`}
-                    onClick={() => actions.setSuggestionCategoryFilter(repo.repoId, "style")}
-                  >
-                    {SCOPE_LABELS.style} ({categoryCounts.style})
                   </button>
                   <button
                     className={`severity-filter-chip category performance ${workflow.suggestionCategoryFilter === "performance" ? "active" : ""}`}
@@ -720,7 +841,19 @@ export function RepoWorkspacePage() {
               </div>
             ))}
 
-            {groupedSuggestions.length === 0 ? <p className="empty-note">Нет suggestions по текущим фильтрам.</p> : null}
+            {hasNoModelFindings ? (
+              <article className="empty-success-card">
+                <span className="empty-success-badge">OK</span>
+                <h3>Модель не нашла замечаний</h3>
+                <p>
+                  По текущему прогону критичных замечаний не обнаружено — можно переходить к подтверждению
+                  {" "}
+                  {prLabel === "MR" ? "merge request" : "pull request"}.
+                </p>
+              </article>
+            ) : null}
+
+            {!hasNoModelFindings && hasNoVisibleSuggestions ? <p className="empty-note">Нет suggestions по текущим фильтрам.</p> : null}
           </div>
 
           <div className="result-right results-detail-panel">
@@ -773,22 +906,61 @@ export function RepoWorkspacePage() {
                   {(activeSuggestion.evidence?.length ?? 0) === 0 ? (
                     <p className="empty-note">Для этой рекомендации evidence пока отсутствует.</p>
                   ) : null}
-                  {activeSuggestion.evidence?.map((item) => (
-                    item.type === "doc" && item.url ? (
-                      <a key={item.evidenceId} href={item.url} target="_blank" rel="noreferrer" className="citation-link">
-                        <strong>{item.type === "doc" ? "Документация" : item.type}: {item.title}</strong>
-                        <span>{item.snippet}</span>
-                      </a>
-                    ) : (
-                      <article key={item.evidenceId} className="citation-link evidence-block">
-                        <strong>{item.type === "code" ? "Код" : item.type === "rule" ? "Правило" : item.type}: {item.title}</strong>
-                        <span>{item.snippet}</span>
-                        {item.filePath ? <span className="mono">{item.filePath}:{item.lineStart ?? "?"}-{item.lineEnd ?? item.lineStart ?? "?"}</span> : null}
+                  {activeSuggestion.evidence?.map((item) => {
+                    const locationLabel = buildEvidenceLocation(item);
+                    const snippet = buildEvidenceSnippet(item);
+                    const contextWindow = item.type === "code" ? getEvidenceWindow(item) : [];
+
+                    return (
+                      <article key={item.evidenceId} className={`citation-link evidence-block evidence-block-${item.type}`}>
+                        <div className="evidence-block-head">
+                          <strong>{buildEvidenceLabel(item)}</strong>
+                          {item.url ? (
+                            <a href={item.url} target="_blank" rel="noreferrer" className="evidence-source-link">
+                              Открыть источник
+                            </a>
+                          ) : null}
+                        </div>
+                        {contextWindow.length > 0 ? (
+                          <div className="evidence-code-window" role="presentation">
+                            {contextWindow.map((line) => {
+                              const focusLine = isEvidenceFocusLine(line, item, activeSuggestion);
+                              return (
+                                <div
+                                  key={`${item.evidenceId}-${line.lineNumber}-${line.text}`}
+                                  className={`evidence-code-line ${line.kind} ${focusLine ? "focus" : ""}`}
+                                >
+                                  <span className="evidence-code-line-num">{line.lineNumber}</span>
+                                  <code>{line.text || " "}</code>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <pre className="evidence-code-block">
+                            <code>{snippet}</code>
+                          </pre>
+                        )}
+                        {locationLabel ? <span className="mono evidence-location">{locationLabel}</span> : null}
                       </article>
-                    )
-                  ))}
+                    );
+                  })}
                 </section>
               </>
+            ) : hasNoModelFindings ? (
+              <article className="detail-main-card empty-success-card detail-success-card">
+                <span className="empty-success-badge">Готово</span>
+                <h3>Можно подтверждать {prLabel === "MR" ? "merge request" : "pull request"}</h3>
+                <p className="detail-body">
+                  Анализ завершён без suggestions. Для текущего snapshot модель не нашла проблем, которые стоит
+                  вынести в review comments.
+                </p>
+                <p className="mono">
+                  {prLabel}: {repoBrowser?.selectedPrNumber ? `#${repoBrowser.selectedPrNumber}` : "не выбран"} ·
+                  {" "}
+                  Job status: {workflow.job ? JOB_STATUS_LABELS[workflow.job.status] : "нет job"}
+                </p>
+              </article>
             ) : (
               <p className="empty-note">Выбери рекомендацию слева.</p>
             )}
@@ -800,7 +972,7 @@ export function RepoWorkspacePage() {
         <section className="card stack-gap">
           <h2>Публикация комментариев</h2>
           <p className="subline">
-            Выбрано в UI: {workflow.selectedSuggestionIds.length} из {inlineSuggestions.length}. В текущем backend MVP публикуются все inline suggestions job.
+            GitHub publish активен. Для GitLab пока доступен только dry-run. Сейчас backend публикует все inline suggestions из текущей job.
           </p>
 
           <label className="field">
@@ -841,6 +1013,14 @@ export function RepoWorkspacePage() {
                 <span>errors</span>
                 <strong>{workflow.publishResult.errors.length}</strong>
               </article>
+            </div>
+          ) : null}
+
+          {workflow.publishResult?.errors.length ? (
+            <div className="empty-block">
+              {workflow.publishResult.errors.map((error, index) => (
+                <p key={`${error}-${index}`}>{error}</p>
+              ))}
             </div>
           ) : null}
 
