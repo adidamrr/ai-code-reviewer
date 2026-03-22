@@ -283,6 +283,8 @@ export function RepoWorkspacePage() {
 
   const inlineSuggestions = filteredSuggestions.filter((item) => (item.deliveryMode ?? "inline") === "inline");
   const summarySuggestions = filteredSuggestions.filter((item) => item.deliveryMode === "summary");
+  const hasNoModelFindings = workflow.job?.status === "done" && workflow.suggestions.length === 0;
+  const hasNoVisibleSuggestions = filteredSuggestions.length === 0;
 
   const severityCounts = useMemo(() => ({
     critical: suggestionsForSeverityCounts.filter((item) => item.severity === "critical").length,
@@ -839,7 +841,19 @@ export function RepoWorkspacePage() {
               </div>
             ))}
 
-            {groupedSuggestions.length === 0 ? <p className="empty-note">Нет suggestions по текущим фильтрам.</p> : null}
+            {hasNoModelFindings ? (
+              <article className="empty-success-card">
+                <span className="empty-success-badge">OK</span>
+                <h3>Модель не нашла замечаний</h3>
+                <p>
+                  По текущему прогону критичных замечаний не обнаружено — можно переходить к подтверждению
+                  {" "}
+                  {prLabel === "MR" ? "merge request" : "pull request"}.
+                </p>
+              </article>
+            ) : null}
+
+            {!hasNoModelFindings && hasNoVisibleSuggestions ? <p className="empty-note">Нет suggestions по текущим фильтрам.</p> : null}
           </div>
 
           <div className="result-right results-detail-panel">
@@ -933,6 +947,20 @@ export function RepoWorkspacePage() {
                   })}
                 </section>
               </>
+            ) : hasNoModelFindings ? (
+              <article className="detail-main-card empty-success-card detail-success-card">
+                <span className="empty-success-badge">Готово</span>
+                <h3>Можно подтверждать {prLabel === "MR" ? "merge request" : "pull request"}</h3>
+                <p className="detail-body">
+                  Анализ завершён без suggestions. Для текущего snapshot модель не нашла проблем, которые стоит
+                  вынести в review comments.
+                </p>
+                <p className="mono">
+                  {prLabel}: {repoBrowser?.selectedPrNumber ? `#${repoBrowser.selectedPrNumber}` : "не выбран"} ·
+                  {" "}
+                  Job status: {workflow.job ? JOB_STATUS_LABELS[workflow.job.status] : "нет job"}
+                </p>
+              </article>
             ) : (
               <p className="empty-note">Выбери рекомендацию слева.</p>
             )}

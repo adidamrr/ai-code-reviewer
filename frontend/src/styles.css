@@ -1392,6 +1392,46 @@ td p {
   font-size: 0.86rem;
 }
 
+.empty-success-card {
+  border: 1px solid rgba(16, 185, 129, 0.24);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(236, 253, 245, 0.96) 0%, rgba(240, 253, 250, 0.92) 100%);
+  padding: 18px;
+  display: grid;
+  gap: 10px;
+  color: #065f46;
+}
+
+.empty-success-card h3 {
+  margin: 0;
+  color: #064e3b;
+}
+
+.empty-success-card p {
+  margin: 0;
+  color: #0f766e;
+}
+
+.empty-success-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(16, 185, 129, 0.22);
+  color: #047857;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.detail-success-card .mono {
+  color: #047857;
+}
+
 .empty-block {
   border: 1px dashed var(--line-strong);
   border-radius: 10px;
