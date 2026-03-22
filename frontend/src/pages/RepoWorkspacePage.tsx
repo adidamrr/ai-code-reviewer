@@ -12,7 +12,117 @@ import {
   STEP_LABELS,
   WORKSPACE_STEPS,
 } from "../store/app-store";
-import type { Suggestion } from "../types";
+import type { Evidence, Suggestion } from "../types";
+
+type EvidenceMeta = Evidence["metadata"] & {
+  headingPath?: unknown;
+  docPath?: unknown;
+  symbol?: unknown;
+  contextWindow?: unknown;
+};
+
+interface EvidenceWindowLine {
+  lineNumber: number;
+  text: string;
+  kind: "add" | "ctx" | "del";
+  highlight?: boolean;
+}
+
+function getEvidenceMetadata(item: Evidence): EvidenceMeta {
+  return (item.metadata ?? {}) as EvidenceMeta;
+}
+
+function buildEvidenceLabel(item: Evidence): string {
+  if (item.type === "code") {
+    return `Код: ${item.title}`;
+  }
+  if (item.type === "doc") {
+    return `KB: ${item.title}`;
+  }
+  if (item.type === "rule") {
+    return `Правило: ${item.title}`;
+  }
+  return `${item.type}: ${item.title}`;
+}
+
+function buildEvidenceLocation(item: Evidence): string | null {
+  if (item.filePath) {
+    return `${item.filePath}:${item.lineStart ?? "?"}-${item.lineEnd ?? item.lineStart ?? "?"}`;
+  }
+
+  const metadata = getEvidenceMetadata(item);
+  const headingPath = Array.isArray(metadata.headingPath)
+    ? metadata.headingPath.filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+    : [];
+  const docPath = typeof metadata.docPath === "string" && metadata.docPath.trim().length > 0
+    ? metadata.docPath
+    : null;
+
+  if (headingPath.length > 0 && docPath) {
+    return `${headingPath.join(" › ")} · ${docPath}`;
+  }
+  if (headingPath.length > 0) {
+    return headingPath.join(" › ");
+  }
+  if (docPath) {
+    return docPath;
+  }
+  if (item.sourceId) {
+    return item.sourceId;
+  }
+
+  return null;
+}
+
+function buildEvidenceSnippet(item: Evidence): string {
+  return item.snippet.replace(/\r\n/g, "\n").trim();
+}
+
+function getEvidenceWindow(item: Evidence): EvidenceWindowLine[] {
+  const metadata = getEvidenceMetadata(item);
+  if (!Array.isArray(metadata.contextWindow)) {
+    return [];
+  }
+
+  return metadata.contextWindow.flatMap((rawLine) => {
+    if (!rawLine || typeof rawLine !== "object") {
+      return [];
+    }
+
+    const candidate = rawLine as Record<string, unknown>;
+    const lineNumber = Number(candidate.lineNumber);
+    const text = typeof candidate.text === "string" ? candidate.text : "";
+    const rawKind = candidate.kind === "add" || candidate.kind === "del" ? candidate.kind : "ctx";
+
+    if (!Number.isFinite(lineNumber)) {
+      return [];
+    }
+
+    return [{
+      lineNumber,
+      text,
+      kind: rawKind,
+      highlight: candidate.highlight === true,
+    }];
+  });
+}
+
+function isEvidenceFocusLine(
+  line: EvidenceWindowLine,
+  item: Evidence,
+  activeSuggestion: Suggestion,
+): boolean {
+  if (item.filePath && item.filePath === activeSuggestion.filePath) {
+    return line.lineNumber >= activeSuggestion.lineStart && line.lineNumber <= activeSuggestion.lineEnd;
+  }
+
+  if (item.lineStart !== null && item.lineStart !== undefined) {
+    const end = item.lineEnd ?? item.lineStart;
+    return line.lineNumber >= item.lineStart && line.lineNumber <= end;
+  }
+
+  return line.highlight === true;
+}
 
 export function RepoWorkspacePage() {
   const { repoId, prNumber } = useParams<{ repoId: string; prNumber?: string }>();
@@ -173,6 +283,8 @@ export function RepoWorkspacePage() {
 
   const inlineSuggestions = filteredSuggestions.filter((item) => (item.deliveryMode ?? "inline") === "inline");
   const summarySuggestions = filteredSuggestions.filter((item) => item.deliveryMode === "summary");
+  const hasNoModelFindings = workflow.job?.status === "done" && workflow.suggestions.length === 0;
+  const hasNoVisibleSuggestions = filteredSuggestions.length === 0;
 
   const severityCounts = useMemo(() => ({
     critical: suggestionsForSeverityCounts.filter((item) => item.severity === "critical").length,
@@ -729,7 +841,19 @@ export function RepoWorkspacePage() {
               </div>
             ))}
 
-            {groupedSuggestions.length === 0 ? <p className="empty-note">Нет suggestions по текущим фильтрам.</p> : null}
+            {hasNoModelFindings ? (
+              <article className="empty-success-card">
+                <span className="empty-success-badge">OK</span>
+                <h3>Модель не нашла замечаний</h3>
+                <p>
+                  По текущему прогону критичных замечаний не обнаружено — можно переходить к подтверждению
+                  {" "}
+                  {prLabel === "MR" ? "merge request" : "pull request"}.
+                </p>
+              </article>
+            ) : null}
+
+            {!hasNoModelFindings && hasNoVisibleSuggestions ? <p className="empty-note">Нет suggestions по текущим фильтрам.</p> : null}
           </div>
 
           <div className="result-right results-detail-panel">
@@ -782,22 +906,61 @@ export function RepoWorkspacePage() {
                   {(activeSuggestion.evidence?.length ?? 0) === 0 ? (
                     <p className="empty-note">Для этой рекомендации evidence пока отсутствует.</p>
                   ) : null}
-                  {activeSuggestion.evidence?.map((item) => (
-                    item.type === "doc" && item.url ? (
-                      <a key={item.evidenceId} href={item.url} target="_blank" rel="noreferrer" className="citation-link">
-                        <strong>{item.type === "doc" ? "Документация" : item.type}: {item.title}</strong>
-                        <span>{item.snippet}</span>
-                      </a>
-                    ) : (
-                      <article key={item.evidenceId} className="citation-link evidence-block">
-                        <strong>{item.type === "code" ? "Код" : item.type === "rule" ? "Правило" : item.type}: {item.title}</strong>
-                        <span>{item.snippet}</span>
-                        {item.filePath ? <span className="mono">{item.filePath}:{item.lineStart ?? "?"}-{item.lineEnd ?? item.lineStart ?? "?"}</span> : null}
+                  {activeSuggestion.evidence?.map((item) => {
+                    const locationLabel = buildEvidenceLocation(item);
+                    const snippet = buildEvidenceSnippet(item);
+                    const contextWindow = item.type === "code" ? getEvidenceWindow(item) : [];
+
+                    return (
+                      <article key={item.evidenceId} className={`citation-link evidence-block evidence-block-${item.type}`}>
+                        <div className="evidence-block-head">
+                          <strong>{buildEvidenceLabel(item)}</strong>
+                          {item.url ? (
+                            <a href={item.url} target="_blank" rel="noreferrer" className="evidence-source-link">
+                              Открыть источник
+                            </a>
+                          ) : null}
+                        </div>
+                        {contextWindow.length > 0 ? (
+                          <div className="evidence-code-window" role="presentation">
+                            {contextWindow.map((line) => {
+                              const focusLine = isEvidenceFocusLine(line, item, activeSuggestion);
+                              return (
+                                <div
+                                  key={`${item.evidenceId}-${line.lineNumber}-${line.text}`}
+                                  className={`evidence-code-line ${line.kind} ${focusLine ? "focus" : ""}`}
+                                >
+                                  <span className="evidence-code-line-num">{line.lineNumber}</span>
+                                  <code>{line.text || " "}</code>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <pre className="evidence-code-block">
+                            <code>{snippet}</code>
+                          </pre>
+                        )}
+                        {locationLabel ? <span className="mono evidence-location">{locationLabel}</span> : null}
                       </article>
-                    )
-                  ))}
+                    );
+                  })}
                 </section>
               </>
+            ) : hasNoModelFindings ? (
+              <article className="detail-main-card empty-success-card detail-success-card">
+                <span className="empty-success-badge">Готово</span>
+                <h3>Можно подтверждать {prLabel === "MR" ? "merge request" : "pull request"}</h3>
+                <p className="detail-body">
+                  Анализ завершён без suggestions. Для текущего snapshot модель не нашла проблем, которые стоит
+                  вынести в review comments.
+                </p>
+                <p className="mono">
+                  {prLabel}: {repoBrowser?.selectedPrNumber ? `#${repoBrowser.selectedPrNumber}` : "не выбран"} ·
+                  {" "}
+                  Job status: {workflow.job ? JOB_STATUS_LABELS[workflow.job.status] : "нет job"}
+                </p>
+              </article>
             ) : (
               <p className="empty-note">Выбери рекомендацию слева.</p>
             )}

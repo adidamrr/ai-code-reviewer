@@ -6,6 +6,25 @@ from .evidence_models import unwrap_doc_ref
 from .schemas import Citation, ContextPack, Evidence, KnowledgeChunk
 
 
+def _truncate_preserving_lines(value: str, *, max_lines: int = 12, max_chars: int = 420) -> str:
+    normalized_lines: list[str] = []
+    for raw_line in value.splitlines():
+        line = re.sub(r"[\t ]+", " ", raw_line).rstrip()
+        if line:
+            normalized_lines.append(line)
+
+    if not normalized_lines:
+        return ""
+
+    clipped_lines = normalized_lines[:max_lines]
+    snippet = "\n".join(clipped_lines)
+    if len(snippet) <= max_chars and len(normalized_lines) <= max_lines:
+        return snippet
+
+    clipped = snippet[: max_chars - 3].rstrip()
+    return f"{clipped}..."
+
+
 class CitationResolver:
     def __init__(self, chunks_by_id: dict[str, KnowledgeChunk]) -> None:
         self.chunks_by_id = chunks_by_id
@@ -29,7 +48,7 @@ class CitationResolver:
                 chunk = self.chunks_by_id.get(doc_chunk_id)
                 if not chunk:
                     return [], []
-                snippet = re.sub(r"\s+", " ", chunk.text).strip()[:320]
+                snippet = _truncate_preserving_lines(chunk.text)
                 if len(snippet) < 40:
                     return [], []
                 evidence.append(
@@ -40,7 +59,11 @@ class CitationResolver:
                         snippet=snippet,
                         sourceId=chunk.sourceId,
                         url=chunk.sourceUrl,
-                        metadata={"chunkId": chunk.chunkId, "headingPath": chunk.headingPath},
+                        metadata={
+                            "chunkId": chunk.chunkId,
+                            "headingPath": chunk.headingPath,
+                            "docPath": chunk.docPath,
+                        },
                     )
                 )
                 if chunk.sourceId not in seen_doc_sources:
