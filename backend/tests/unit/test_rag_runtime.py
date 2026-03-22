@@ -174,6 +174,54 @@ class RagRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("lowerCamelCase", citations[0].snippet)
         self.assertEqual(evidence[0].type, "doc")
 
+    def test_citation_resolver_preserves_multiline_doc_snippets_for_evidence_blocks(self) -> None:
+        chunk = KnowledgeChunk(
+            chunkId="python:asyncio:000777",
+            namespace="python",
+            language="python",
+            sourceId="python-docs",
+            sourceTitle="Python Docs",
+            sourceUrl="https://docs.python.org/3/library/asyncio.html",
+            docPath="/tmp/asyncio.txt",
+            headingPath=["Python Docs", "asyncio", "Examples"],
+            text="await client.fetch()\nresult = normalize(payload)\n\nUse await for IO-bound calls inside coroutines.",
+            charStart=0,
+            charEnd=92,
+            tokenEstimate=20,
+        )
+        task = HunkTask(
+            taskId="lib/example.dart:0",
+            filePath="lib/example.dart",
+            language="Dart",
+            languageSlug="dart",
+            patch="@@ -1 +1 @@\n+final My_var = 1;",
+            hunkIndex=0,
+            hunkHeader="@@ -1 +1 @@",
+            hunkPatch="@@ -1 +1 @@\n+final My_var = 1;",
+            addedLines=["final My_var = 1;"],
+            changedNewLines=[1],
+            firstChangedLine=1,
+            priority=1.0,
+        )
+        context = build_context_pack(task, [], [RetrievalHit(
+            chunkId=chunk.chunkId,
+            namespace=chunk.namespace,
+            sourceId=chunk.sourceId,
+            title=chunk.sourceTitle,
+            url=chunk.sourceUrl,
+            headingPath=chunk.headingPath,
+            text=chunk.text,
+            finalScore=0.9,
+            sparseRank=1,
+            denseRank=1,
+        )])
+
+        evidence, _ = CitationResolver({chunk.chunkId: chunk}).resolve([doc_ref(chunk.chunkId)], context)
+
+        self.assertEqual(evidence[0].snippet.splitlines()[0], "await client.fetch()")
+        self.assertIn("result = normalize(payload)", evidence[0].snippet)
+        self.assertEqual(evidence[0].metadata.get("docPath"), "/tmp/asyncio.txt")
+
     def test_validator_rejects_missing_evidence(self) -> None:
         candidate = CandidateFinding(
             filePath="lib/example.dart",

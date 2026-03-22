@@ -1265,9 +1265,56 @@ button:disabled {
   text-decoration: none;
   color: #1f3657;
   display: grid;
-  gap: 4px;
-  padding: 8px;
+  gap: 8px;
+  padding: 10px;
   background: #fff;
+}
+
+.evidence-block {
+  gap: 10px;
+}
+
+.evidence-block-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.evidence-block-head strong {
+  color: #1e3a5f;
+}
+
+.evidence-source-link {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: #2563eb;
+}
+
+.evidence-code-block {
+  margin: 0;
+  background: #020617;
+  color: #dbe7f6;
+  border-radius: 10px;
+  padding: 12px;
+  overflow: auto;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 0.77rem;
+  line-height: 1.5;
+}
+
+.evidence-code-block code {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.evidence-location {
+  color: #64748b;
+  font-size: 0.76rem;
+}
+
+.evidence-block-doc .evidence-code-block {
+  background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
 }
 
 .summary-list p {
