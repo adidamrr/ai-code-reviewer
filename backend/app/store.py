@@ -911,7 +911,7 @@ class InMemoryStore:
                     "jobId": job_id,
                     "suggestionId": suggestion["id"],
                     "providerCommentId": str(item.get("providerCommentId") or "") or None,
-                    "mode": mode,
+                    "mode": str(item.get("mode") or mode),
                     "state": str(item.get("state") or "posted"),
                     "filePath": str(item.get("filePath") or suggestion["filePath"]),
                     "lineStart": int(item.get("lineStart") or suggestion["lineStart"]),

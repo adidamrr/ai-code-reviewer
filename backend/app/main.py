@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -157,7 +158,7 @@ async def github_post(client: httpx.AsyncClient, token: str, url: str, payload: 
     return await github_api_request(client, token, "POST", url, payload)
 
 
-def build_github_comment_body(suggestion: dict[str, Any], mode: str) -> str:
+def build_publish_comment_body(suggestion: dict[str, Any], mode: str) -> str:
     confidence = suggestion.get("confidence")
     confidence_text = "?"
     if isinstance(confidence, (int, float)):
@@ -216,7 +217,7 @@ async def publish_github_comments(
     errors: list[str] = []
 
     for suggestion in suggestions:
-        body = build_github_comment_body(suggestion, mode)
+        body = build_publish_comment_body(suggestion, mode)
         try:
             if mode == "issue_comments":
                 payload = {"body": body}
@@ -269,6 +270,132 @@ async def publish_github_comments(
     return comments, errors
 
 
+def humanize_gitlab_publish_error(error: HttpError, mode: str) -> str:
+    raw_message = error.message.removeprefix("GitLab API error: ").strip()
+    if error.status_code in {401, 403}:
+        if mode == "issue_comments":
+            return "Токен не имеет прав на публикацию MR notes в GitLab."
+        return "Токен не имеет прав на публикацию diff discussions в GitLab."
+    if error.status_code == 404:
+        return "GitLab не дал доступ к merge request или проекту."
+    if error.status_code == 422:
+        return f"GitLab не принял позицию комментария: {raw_message or 'invalid discussion payload'}"
+    return raw_message or error.message
+
+
+def build_gitlab_discussion_payload(
+    suggestion: dict[str, Any],
+    *,
+    body: str,
+    base_sha: str,
+    start_sha: str,
+    head_sha: str,
+) -> dict[str, Any]:
+    file_path = str(suggestion.get("filePath") or "")
+    line_end = int(suggestion.get("lineEnd") or suggestion.get("lineStart") or 1)
+    return {
+        "body": body,
+        "position[position_type]": "text",
+        "position[base_sha]": base_sha,
+        "position[start_sha]": start_sha,
+        "position[head_sha]": head_sha,
+        "position[old_path]": file_path,
+        "position[new_path]": file_path,
+        "position[new_line]": str(line_end),
+    }
+
+
+async def publish_gitlab_comments(
+    client: httpx.AsyncClient,
+    token: str,
+    *,
+    project_ref: str,
+    mr_iid: int,
+    base_sha: str,
+    start_sha: str,
+    head_sha: str,
+    mode: str,
+    suggestions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    comments: list[dict[str, Any]] = []
+    errors: list[str] = []
+    encoded_project = quote(project_ref, safe="")
+
+    for suggestion in suggestions:
+        diff_body = build_publish_comment_body(suggestion, mode)
+        overview_body = build_publish_comment_body(suggestion, "issue_comments")
+        try:
+            actual_mode = mode
+            response: Any
+            if mode == "issue_comments":
+                response = await gitlab_api_request(
+                    client,
+                    token,
+                    "POST",
+                    f"https://gitlab.com/api/v4/projects/{encoded_project}/merge_requests/{mr_iid}/notes",
+                    {"body": overview_body},
+                )
+            else:
+                try:
+                    response = await gitlab_api_request(
+                        client,
+                        token,
+                        "POST",
+                        f"https://gitlab.com/api/v4/projects/{encoded_project}/merge_requests/{mr_iid}/discussions",
+                        build_gitlab_discussion_payload(
+                            suggestion,
+                            body=diff_body,
+                            base_sha=base_sha,
+                            start_sha=start_sha,
+                            head_sha=head_sha,
+                        ),
+                    )
+                except HttpError as error:
+                    if error.status_code not in {400, 404, 409, 422}:
+                        raise
+                    actual_mode = "issue_comments"
+                    response = await gitlab_api_request(
+                        client,
+                        token,
+                        "POST",
+                        f"https://gitlab.com/api/v4/projects/{encoded_project}/merge_requests/{mr_iid}/notes",
+                        {"body": overview_body},
+                    )
+
+            if not isinstance(response, dict):
+                raise HttpError(502, "gitlab_api_error", "GitLab API error: invalid publish response")
+
+            provider_comment_id = response.get("id")
+            created_at = response.get("created_at")
+
+            if actual_mode == "review_comments":
+                notes = response.get("notes")
+                first_note = notes[0] if isinstance(notes, list) and notes else None
+                if isinstance(first_note, dict):
+                    provider_comment_id = first_note.get("id") or provider_comment_id
+                    created_at = first_note.get("created_at") or created_at
+
+            comments.append(
+                {
+                    "suggestionId": suggestion["id"],
+                    "providerCommentId": str(provider_comment_id or ""),
+                    "state": "posted",
+                    "mode": actual_mode,
+                    "filePath": suggestion["filePath"],
+                    "lineStart": suggestion["lineStart"],
+                    "lineEnd": suggestion["lineEnd"],
+                    "body": overview_body if actual_mode == "issue_comments" else diff_body,
+                    "createdAt": created_at or datetime_utc_iso(),
+                }
+            )
+        except HttpError as error:
+            errors.append(
+                f"{suggestion['filePath']}:{suggestion['lineStart']}: {humanize_gitlab_publish_error(error, mode)}"
+            )
+
+    return comments, errors
+
+
 async def fetch_user_repos(client: httpx.AsyncClient, token: str) -> list[dict[str, Any]]:
     repos: list[dict[str, Any]] = []
     for page in range(1, 11):
@@ -302,13 +429,21 @@ async def fetch_pull_files(client: httpx.AsyncClient, token: str, owner: str, re
     return files
 
 
-async def gitlab_request(client: httpx.AsyncClient, token: str, url: str) -> Any:
-    response = await client.get(
+async def gitlab_api_request(
+    client: httpx.AsyncClient,
+    token: str,
+    method: str,
+    url: str,
+    payload: dict[str, Any] | None = None,
+) -> Any:
+    response = await client.request(
+        method,
         url,
         headers={
             "PRIVATE-TOKEN": token,
             "User-Agent": "SWAGReviewer-Python",
         },
+        data=payload,
     )
 
     text = response.text
@@ -327,6 +462,10 @@ async def gitlab_request(client: httpx.AsyncClient, token: str, url: str) -> Any
         )
 
     return data
+
+
+async def gitlab_request(client: httpx.AsyncClient, token: str, url: str) -> Any:
+    return await gitlab_api_request(client, token, "GET", url)
 
 
 async def fetch_gitlab_projects(client: httpx.AsyncClient, token: str) -> list[dict[str, Any]]:
@@ -349,6 +488,20 @@ async def fetch_gitlab_mr_changes(client: httpx.AsyncClient, token: str, project
     if not isinstance(changes, list):
         return []
     return [item for item in changes if isinstance(item, dict)]
+
+
+async def fetch_gitlab_mr_version(client: httpx.AsyncClient, token: str, project_ref: str, mr_iid: int) -> dict[str, Any] | None:
+    encoded_project = quote(project_ref, safe="")
+    payload = await gitlab_request(
+        client,
+        token,
+        f"https://gitlab.com/api/v4/projects/{encoded_project}/merge_requests/{mr_iid}/versions",
+    )
+    if not isinstance(payload, list) or not payload:
+        return None
+
+    latest = payload[0]
+    return latest if isinstance(latest, dict) else None
 
 
 async def parse_json_body(request: Request) -> dict[str, Any]:
@@ -981,27 +1134,44 @@ def create_app(config: AppConfig) -> FastAPI:
 
         pr = store.get_pr(pr_id)
         repo = store.get_repo(pr["repoId"])
-        if repo.get("provider") != "github":
-            raise HttpError(501, "publish_not_supported", "Real publish is currently supported only for GitHub pull requests")
+        provider = str(repo.get("provider") or "github")
+        if provider not in {"github", "gitlab"}:
+            raise HttpError(501, "publish_not_supported", f"Real publish is not supported for provider: {provider}")
         if not session_id:
-            raise HttpError(400, "validation_error", "sessionId is required for real GitHub publish")
+            raise HttpError(400, "validation_error", f"sessionId is required for real {provider} publish")
 
-        session = github_sessions.get_for_provider(session_id, "github")
         job = store.get_job(job_id)
         snapshot = store.get_snapshot(job["snapshotId"])["snapshot"]
         suggestions = store.get_publish_candidates(pr_id, job_id)
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            published_comments, errors = await publish_github_comments(
-                client,
-                session["token"],
-                owner=repo["owner"],
-                repo=repo["name"],
-                pr_number=pr["number"],
-                commit_sha=str(snapshot.get("commitSha") or pr["headSha"]),
-                mode=mode,
-                suggestions=suggestions,
-            )
+            if provider == "gitlab":
+                session = github_sessions.get_for_provider(session_id, "gitlab")
+                version = await fetch_gitlab_mr_version(client, session["token"], repo["fullName"], pr["number"])
+                diff_refs = version or {}
+                published_comments, errors = await publish_gitlab_comments(
+                    client,
+                    session["token"],
+                    project_ref=repo["fullName"],
+                    mr_iid=pr["number"],
+                    base_sha=str(diff_refs.get("base_commit_sha") or pr["baseSha"]),
+                    start_sha=str(diff_refs.get("start_commit_sha") or pr["baseSha"]),
+                    head_sha=str(diff_refs.get("head_commit_sha") or snapshot.get("commitSha") or pr["headSha"]),
+                    mode=mode,
+                    suggestions=suggestions,
+                )
+            else:
+                session = github_sessions.get_for_provider(session_id, "github")
+                published_comments, errors = await publish_github_comments(
+                    client,
+                    session["token"],
+                    owner=repo["owner"],
+                    repo=repo["name"],
+                    pr_number=pr["number"],
+                    commit_sha=str(snapshot.get("commitSha") or pr["headSha"]),
+                    mode=mode,
+                    suggestions=suggestions,
+                )
 
         result = store.publish(
             pr_id,

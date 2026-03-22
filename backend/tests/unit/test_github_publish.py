@@ -134,6 +134,33 @@ class GithubPublishTests(unittest.TestCase):
         self.assertEqual(result["comments"][0]["providerCommentId"], "98765")
         self.assertEqual(result["comments"][0]["body"], "real GitHub comment")
 
+    def test_publish_allows_provider_specific_comment_mode_override(self) -> None:
+        store = InMemoryStore()
+        pr, job = _seed_publish_fixture(store)
+
+        result = store.publish(
+            pr["id"],
+            job["id"],
+            "review_comments",
+            False,
+            published_comments=[
+                {
+                    "suggestionId": "sug_publish",
+                    "providerCommentId": "111",
+                    "mode": "issue_comments",
+                    "state": "posted",
+                    "filePath": "lib/widget.dart",
+                    "lineStart": 14,
+                    "lineEnd": 14,
+                    "body": "fallback note",
+                    "createdAt": "2026-03-21T00:00:03Z",
+                }
+            ],
+        )
+
+        self.assertEqual(result["publishedCount"], 1)
+        self.assertEqual(result["comments"][0]["mode"], "issue_comments")
+
 
 if __name__ == "__main__":
     unittest.main()

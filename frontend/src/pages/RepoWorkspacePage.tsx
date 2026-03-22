@@ -972,7 +972,7 @@ export function RepoWorkspacePage() {
         <section className="card stack-gap">
           <h2>Публикация комментариев</h2>
           <p className="subline">
-            GitHub publish активен. Для GitLab пока доступен только dry-run. Сейчас backend публикует все inline suggestions из текущей job.
+            Сейчас backend публикует все inline suggestions из текущей job: в GitHub — review comments / issue comments, в GitLab — diff discussions / MR notes.
           </p>
 
           <label className="field">
@@ -1089,6 +1089,22 @@ export function RepoWorkspacePage() {
                     <p key={entry.category}>{SCOPE_LABELS[entry.category]}: {entry.score}</p>
                   ))}
                   {workflow.feedbackSummary.byCategory.length === 0 ? <p>-</p> : null}
+                </section>
+
+                <section className="summary-list">
+                  <h4>По severity</h4>
+                  {workflow.feedbackSummary.bySeverity.map((entry) => (
+                    <p key={entry.severity}>{entry.severity}: {entry.score}</p>
+                  ))}
+                  {workflow.feedbackSummary.bySeverity.length === 0 ? <p>-</p> : null}
+                </section>
+
+                <section className="summary-list">
+                  <h4>По файлам</h4>
+                  {workflow.feedbackSummary.byFile.map((entry) => (
+                    <p key={entry.filePath}>{entry.filePath}: {entry.score} ({entry.comments} comments)</p>
+                  ))}
+                  {workflow.feedbackSummary.byFile.length === 0 ? <p>-</p> : null}
                 </section>
               </div>
             ) : (
