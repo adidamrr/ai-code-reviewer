@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -15,6 +17,8 @@ from app.store import InMemoryStore, now_iso
 class AdaptationV1Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.store = InMemoryStore()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.store.feedback_dataset_root = Path(self.temp_dir.name)
         self.pr = self.store.get_or_create_pr(
             "repo_demo",
             101,
@@ -45,6 +49,9 @@ class AdaptationV1Tests(unittest.TestCase):
         self.store.jobs_by_pr[self.pr["id"]] = [self.job["id"]]
         self.store.suggestions_by_job[self.job["id"]] = []
         self.store.comments_by_pr.setdefault(self.pr["id"], [])
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
 
     def _add_suggestion(
         self,
@@ -223,6 +230,20 @@ class AdaptationV1Tests(unittest.TestCase):
         item = next(entry for entry in page["items"] if entry["id"] == "s_up")
 
         self.assertGreater(item["confidence"], 0.60)
+
+    def test_feedback_vote_saves_dataset_snapshot_to_disk(self) -> None:
+        self._add_suggestion("s_dataset", fingerprint="fp_dataset", title="Dataset export", rank_score=0.55)
+        self._add_comment("c_dataset", "s_dataset")
+
+        self.store.upsert_feedback("c_dataset", "reviewer_1", "up", "clear and actionable")
+
+        dataset_file = self.store.feedback_dataset_root / f"{self.pr['id']}.json"
+        self.assertTrue(dataset_file.exists())
+        dataset = json.loads(dataset_file.read_text(encoding="utf-8"))
+        self.assertEqual(dataset["schemaVersion"], "feedback-dataset.v1")
+        self.assertEqual(dataset["counts"]["items"], 1)
+        self.assertEqual(dataset["counts"]["votes"], 1)
+        self.assertEqual(dataset["items"][0]["trainingRow"]["sampleWeight"], 1)
 
     def test_smoothed_utility_prevents_extreme_score_from_single_vote(self) -> None:
         self._add_suggestion("s_smooth", fingerprint="fp_smooth", title="Sparse feedback", rank_score=0.40)

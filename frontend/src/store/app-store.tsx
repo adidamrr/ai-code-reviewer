@@ -268,6 +268,7 @@ interface AppStoreActions {
   setFeedbackReason: (repoId: string, reason: string) => void;
   voteComment: (repoId: string, commentId: string, vote: "up" | "down") => Promise<void>;
   loadFeedbackSummary: (repoId: string) => Promise<void>;
+  saveFeedbackDataset: (repoId: string) => Promise<void>;
 
   loadRepoRuns: (repoId: string, reset?: boolean) => Promise<void>;
   reopenRun: (repoId: string, run: RepoRunSummary) => Promise<void>;
@@ -1571,6 +1572,20 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
         });
       },
 
+      saveFeedbackDataset: async (repoId) => {
+        const { review } = getCurrentReviewContext(repoId);
+        const prId = review.syncData?.prId ?? review.job?.prId;
+        if (!prId) {
+          setState((prev) => ({ ...prev, error: "Нет связанного PR" }));
+          return;
+        }
+
+        await runTask("Датасет фидбека сохранён", async () => {
+          const api = apiFactory();
+          await api.saveFeedbackDataset(prId);
+        });
+      },
+
       loadRepoRuns: async (repoId, reset = true) => {
         const { prNumber, reviewKey, review } = getCurrentReviewContext(repoId);
         const cursor = reset ? null : review.runsCursor ?? null;
@@ -1804,7 +1819,7 @@ function createDefaultReviewWorkspace(repoId: string, prNumber: number | null): 
     comments: [],
     feedbackSummary: null,
     feedbackUserId: "dev_local",
-    feedbackReason: "полезно",
+    feedbackReason: "",
     runs: [],
     runsCursor: null,
     historyIsMock: false,

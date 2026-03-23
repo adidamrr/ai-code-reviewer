@@ -3,6 +3,7 @@ import type {
   AnalysisJobEvent,
   AnalysisJobCreateResponse,
   CursorPage,
+  FeedbackDatasetSaveResult,
   FeedbackSummary,
   GenerationModelProfile,
   GithubPr,
@@ -206,6 +207,12 @@ export class ApiClient {
 
   getFeedbackSummary(prId: string) {
     return this.request<FeedbackSummary>(`/prs/${prId}/feedback-summary`);
+  }
+
+  saveFeedbackDataset(prId: string) {
+    return this.request<FeedbackDatasetSaveResult>(`/prs/${prId}/feedback-dataset`, {
+      method: "POST",
+    });
   }
 
   getPr(prId: string) {

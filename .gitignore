@@ -4,6 +4,7 @@
 backend/node_modules/
 backend/dist/
 backend/.venv/
+backend/data/feedback-datasets/
 frontend/node_modules/
 frontend/dist/
 *.tsbuildinfo

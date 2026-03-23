@@ -503,6 +503,22 @@ paths:
         '404':
           $ref: '#/components/responses/ErrorResponse'
 
+  /prs/{prId}/feedback-dataset:
+    post:
+      tags: [Feedback]
+      summary: Save feedback dataset for PR adaptation
+      parameters:
+        - $ref: '#/components/parameters/PrIdParam'
+      responses:
+        '200':
+          description: Saved dataset metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedbackDatasetSaveResult'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+
   /adaptation/status:
     get:
       tags: [Adaptation]
@@ -1087,6 +1103,16 @@ components:
               score: { type: integer }
             required: [severity, up, down, score]
       required: [prId, overall, byFile, byCategory, bySeverity]
+
+    FeedbackDatasetSaveResult:
+      type: object
+      properties:
+        prId: { type: string }
+        savedAt: { type: string, format: date-time }
+        filePath: { type: string }
+        items: { type: integer, minimum: 0 }
+        votes: { type: integer, minimum: 0 }
+      required: [prId, savedAt, filePath, items, votes]
 
     AdaptationStatus:
       type: object
