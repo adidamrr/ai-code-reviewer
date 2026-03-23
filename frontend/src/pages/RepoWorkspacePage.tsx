@@ -28,6 +28,80 @@ interface EvidenceWindowLine {
   highlight?: boolean;
 }
 
+interface ParsedFeedbackComment {
+  title: string;
+  summary: string;
+  location: string;
+  delivery: string | null;
+  category: string | null;
+  severity: string | null;
+  confidence: string | null;
+  references: string[];
+}
+
+function parseFeedbackCommentBody(body: string): ParsedFeedbackComment {
+  const normalized = body.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+  const parsed: ParsedFeedbackComment = {
+    title: "",
+    summary: "",
+    location: "",
+    delivery: null,
+    category: null,
+    severity: null,
+    confidence: null,
+    references: [],
+  };
+
+  let inReferences = false;
+  for (const line of lines) {
+    if (line === "References:") {
+      inReferences = true;
+      continue;
+    }
+    if (inReferences) {
+      parsed.references.push(line.replace(/^- /, ""));
+      continue;
+    }
+    if (line.startsWith("Title:")) {
+      parsed.title = line.replace(/^Title:\s*/, "");
+      continue;
+    }
+    if (line.startsWith("Why it matters:")) {
+      parsed.summary = line.replace(/^Why it matters:\s*/, "");
+      continue;
+    }
+    if (line.startsWith("Location:")) {
+      parsed.location = line.replace(/^Location:\s*/, "");
+      continue;
+    }
+    if (line.startsWith("Delivery:")) {
+      parsed.delivery = line.replace(/^Delivery:\s*/, "");
+      continue;
+    }
+    if (line.startsWith("Category:")) {
+      parsed.category = line.replace(/^Category:\s*/, "");
+      continue;
+    }
+    if (line.startsWith("Severity:")) {
+      parsed.severity = line.replace(/^Severity:\s*/, "");
+      continue;
+    }
+    if (line.startsWith("Confidence:")) {
+      parsed.confidence = line.replace(/^Confidence:\s*/, "");
+      continue;
+    }
+  }
+
+  if (!parsed.title && lines.length > 0) {
+    parsed.title = lines[0];
+  }
+  if (!parsed.summary && lines.length > 1) {
+    parsed.summary = lines[1];
+  }
+  return parsed;
+}
+
 function getEvidenceMetadata(item: Evidence): EvidenceMeta {
   return (item.metadata ?? {}) as EvidenceMeta;
 }
@@ -1033,52 +1107,84 @@ export function RepoWorkspacePage() {
       {workflow.activeStep === "feedback" ? (
         <section className="card split-results">
           <div className="result-left">
-            <h2>Голоса команды</h2>
+            <h2>Оценка опубликованных замечаний</h2>
+            <p className="subline">
+              Отмечайте полезные сигналы и шумные замечания. После каждого голоса backend обновляет summary и
+              сохраняет dataset для adaptation-модели.
+            </p>
 
             <label className="field">
-              <span>Пользователь</span>
+              <span>Ревьюер</span>
               <input value={workflow.feedbackUserId} onChange={(event) => actions.setFeedbackUserId(repo.repoId, event.target.value)} />
             </label>
 
             <label className="field">
-              <span>Причина (опционально)</span>
-              <input value={workflow.feedbackReason} onChange={(event) => actions.setFeedbackReason(repo.repoId, event.target.value)} />
+              <span>Контекст для датасета (опционально)</span>
+              <textarea
+                rows={3}
+                placeholder="Например: false positive, слишком общий совет, хорошая находка, не хватает контекста."
+                value={workflow.feedbackReason}
+                onChange={(event) => actions.setFeedbackReason(repo.repoId, event.target.value)}
+              />
             </label>
 
             <div className="comment-list">
-              {workflow.comments.map((comment) => (
-                <article className="comment-item" key={comment.id}>
-                  <p className="mono">{comment.filePath}:{comment.lineStart}-{comment.lineEnd}</p>
-                  <p>{comment.body}</p>
-                  <div className="row-actions">
-                    <button className="secondary-btn" onClick={() => actions.voteComment(repo.repoId, comment.id, "up")}>Полезно</button>
-                    <button className="secondary-btn danger" onClick={() => actions.voteComment(repo.repoId, comment.id, "down")}>Неполезно</button>
-                  </div>
-                </article>
-              ))}
+              {workflow.comments.map((comment) => {
+                const parsed = parseFeedbackCommentBody(comment.body);
+                return (
+                  <article className="comment-item feedback-card" key={comment.id}>
+                    <div className="feedback-card__header">
+                      <p className="mono">{parsed.location || `${comment.filePath}:${comment.lineStart}-${comment.lineEnd}`}</p>
+                      <h4>{parsed.title || "Замечание без заголовка"}</h4>
+                    </div>
+                    <p className="feedback-card__summary">{parsed.summary || comment.body}</p>
+                    <div className="feedback-card__meta">
+                      {parsed.category ? <span className="status-badge neutral">Категория: {parsed.category}</span> : null}
+                      {parsed.severity ? <span className="status-badge neutral">Severity: {parsed.severity}</span> : null}
+                      {parsed.confidence ? <span className="status-badge neutral">Confidence: {parsed.confidence}</span> : null}
+                      {parsed.delivery ? <span className="status-badge neutral">Delivery: {parsed.delivery}</span> : null}
+                    </div>
+                    {parsed.references.length > 0 ? (
+                      <div className="feedback-card__references">
+                        <span>Источники</span>
+                        <ul>
+                          {parsed.references.map((reference) => (
+                            <li key={reference}>{reference}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    <div className="row-actions">
+                      <button className="secondary-btn" onClick={() => actions.voteComment(repo.repoId, comment.id, "up")}>Полезный сигнал</button>
+                      <button className="secondary-btn danger" onClick={() => actions.voteComment(repo.repoId, comment.id, "down")}>Шум / неактуально</button>
+                    </div>
+                  </article>
+                );
+              })}
               {workflow.comments.length === 0 ? <p className="empty-note">Нет опубликованных комментариев.</p> : null}
             </div>
           </div>
 
           <div className="result-right">
-            <h3>Сводка фидбека</h3>
+            <h3>Сводка по качеству сигналов</h3>
             <div className="row-actions">
-              <button className="secondary-btn" onClick={() => actions.loadFeedbackSummary(repo.repoId)}>Обновить summary</button>
+              <button className="secondary-btn" onClick={() => actions.loadFeedbackSummary(repo.repoId)}>Обновить сводку</button>
+              <button className="secondary-btn" onClick={() => actions.saveFeedbackDataset(repo.repoId)}>Сохранить датасет</button>
             </div>
 
             {workflow.feedbackSummary ? (
               <div className="stack-gap">
                 <div className="kpi-grid">
                   <article className="kpi-card">
-                    <span>up</span>
+                    <span>Полезных</span>
                     <strong>{workflow.feedbackSummary.overall.up}</strong>
                   </article>
                   <article className="kpi-card">
-                    <span>down</span>
+                    <span>Шумных</span>
                     <strong>{workflow.feedbackSummary.overall.down}</strong>
                   </article>
                   <article className="kpi-card">
-                    <span>score</span>
+                    <span>Итоговый score</span>
                     <strong>{workflow.feedbackSummary.overall.score}</strong>
                   </article>
                 </div>

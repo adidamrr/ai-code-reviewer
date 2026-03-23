@@ -1362,6 +1362,56 @@ button:disabled {
   margin: 6px 0;
 }
 
+.feedback-card {
+  display: grid;
+  gap: 10px;
+}
+
+.feedback-card__header {
+  display: grid;
+  gap: 4px;
+}
+
+.feedback-card__header h4 {
+  margin: 0;
+  font-size: 1rem;
+  color: #0f172a;
+}
+
+.feedback-card__summary {
+  margin: 0;
+  color: #22324c;
+  line-height: 1.6;
+}
+
+.feedback-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.feedback-card__references {
+  display: grid;
+  gap: 6px;
+  color: #42526b;
+  font-size: 0.84rem;
+}
+
+.feedback-card__references span {
+  font-weight: 700;
+}
+
+.feedback-card__references ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.status-badge.neutral {
+  background: #eef4ff;
+  color: #24406d;
+  border-color: rgba(59, 130, 246, 0.18);
+}
+
 .table-wrap {
   overflow: auto;
 }

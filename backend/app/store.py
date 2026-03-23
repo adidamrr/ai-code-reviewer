@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -36,6 +39,7 @@ from .rag_adapter import analyze_with_rag
 
 MAX_SYNC_FILES = 500
 PATCH_CAP_BYTES = 300 * 1024
+FEEDBACK_DATASET_ROOT = Path(__file__).resolve().parents[1] / "data" / "feedback-datasets"
 
 
 def now_iso() -> str:
@@ -115,6 +119,9 @@ class InMemoryStore:
             bootstrap_model["version"]: bootstrap_model
         }
         self.active_adaptation_model_version = bootstrap_model["version"]
+        self.feedback_dataset_root = Path(
+            os.getenv("FEEDBACK_DATASET_DIR", str(FEEDBACK_DATASET_ROOT))
+        ).resolve()
         self.publish_runs: dict[str, dict[str, Any]] = {}
         self.analysis_tasks: dict[str, asyncio.Task[Any]] = {}
         self.seed()
@@ -204,6 +211,12 @@ class InMemoryStore:
                 add_vote_counts(stat, totals["up"], totals["down"])
 
         return by_suggestion
+
+    def _feedback_votes_for_comment(self, comment_id: str) -> list[dict[str, Any]]:
+        vote_ids = self.feedback_by_comment.get(comment_id, [])
+        votes = [self.feedback_votes[item_id] for item_id in vote_ids if item_id in self.feedback_votes]
+        votes.sort(key=lambda item: item["updatedAt"], reverse=True)
+        return votes
 
     def _build_training_rows(self) -> list[dict[str, Any]]:
         feedback_by_suggestion = self._rebuild_adaptation_feature_stats()
@@ -1004,6 +1017,7 @@ class InMemoryStore:
             existing["reason"] = reason
             existing["updatedAt"] = now
             self._rebuild_adaptation_feature_stats()
+            self.save_pr_feedback_dataset(comment["prId"])
             return existing
 
         feedback = {
@@ -1018,6 +1032,7 @@ class InMemoryStore:
         self.feedback_votes[feedback["id"]] = feedback
         self.feedback_by_comment.setdefault(comment_id, []).append(feedback["id"])
         self._rebuild_adaptation_feature_stats()
+        self.save_pr_feedback_dataset(comment["prId"])
         return feedback
 
     def get_comment_feedback(self, comment_id: str) -> dict[str, Any]:
@@ -1090,6 +1105,103 @@ class InMemoryStore:
             "byFile": [{"filePath": key, **value} for key, value in by_file.items()],
             "byCategory": [{"category": key, **value} for key, value in by_category.items()],
             "bySeverity": [{"severity": key, **value} for key, value in by_severity.items()],
+        }
+
+    def build_pr_feedback_dataset(self, pr_id: str) -> dict[str, Any]:
+        pr = self.get_pr(pr_id)
+        comment_ids = self.comments_by_pr.get(pr_id, [])
+        feedback_by_suggestion = self._rebuild_adaptation_feature_stats()
+        items: list[dict[str, Any]] = []
+        total_votes = 0
+
+        for comment_id in comment_ids:
+            comment = self.comments.get(comment_id)
+            if not comment:
+                continue
+
+            suggestion = self.suggestions.get(comment["suggestionId"])
+            if not suggestion:
+                continue
+
+            votes = self._feedback_votes_for_comment(comment["id"])
+            totals = vote_totals(votes)
+            if totals["voteCount"] <= 0:
+                continue
+
+            snapshot = self._ensure_feature_snapshot(suggestion)
+            priors = build_training_priors(snapshot, self.adaptation_feature_stats)
+            training_feedback = feedback_by_suggestion.get(
+                suggestion["id"],
+                {
+                    "smoothedUtility": 0.0,
+                    "voteCount": totals["voteCount"],
+                },
+            )
+            total_votes += totals["voteCount"]
+            items.append(
+                {
+                    "comment": {
+                        "id": comment["id"],
+                        "filePath": comment["filePath"],
+                        "lineStart": comment["lineStart"],
+                        "lineEnd": comment["lineEnd"],
+                        "body": comment["body"],
+                    },
+                    "suggestion": {
+                        "id": suggestion["id"],
+                        "fingerprint": suggestion["fingerprint"],
+                        "title": suggestion["title"],
+                        "body": suggestion["body"],
+                        "category": suggestion["category"],
+                        "severity": suggestion["severity"],
+                        "deliveryMode": suggestion.get("deliveryMode"),
+                        "confidence": suggestion.get("confidence"),
+                    },
+                    "votes": [
+                        {
+                            "id": vote["id"],
+                            "userId": vote["userId"],
+                            "vote": vote["vote"],
+                            "reason": vote.get("reason"),
+                            "createdAt": vote["createdAt"],
+                            "updatedAt": vote["updatedAt"],
+                        }
+                        for vote in votes
+                    ],
+                    "totals": totals,
+                    "snapshot": snapshot,
+                    "trainingRow": {
+                        "features": encode_training_features(snapshot, priors),
+                        "target": float(training_feedback["smoothedUtility"]),
+                        "sampleWeight": int(training_feedback["voteCount"]),
+                    },
+                }
+            )
+
+        return {
+            "schemaVersion": "feedback-dataset.v1",
+            "exportedAt": now_iso(),
+            "repoId": pr["repoId"],
+            "prId": pr_id,
+            "prNumber": pr["number"],
+            "items": items,
+            "counts": {
+                "items": len(items),
+                "votes": total_votes,
+            },
+        }
+
+    def save_pr_feedback_dataset(self, pr_id: str) -> dict[str, Any]:
+        dataset = self.build_pr_feedback_dataset(pr_id)
+        self.feedback_dataset_root.mkdir(parents=True, exist_ok=True)
+        file_path = self.feedback_dataset_root / f"{pr_id}.json"
+        file_path.write_text(json.dumps(dataset, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            "prId": pr_id,
+            "savedAt": dataset["exportedAt"],
+            "filePath": str(file_path),
+            "items": dataset["counts"]["items"],
+            "votes": dataset["counts"]["votes"],
         }
 
     def append_job_event(

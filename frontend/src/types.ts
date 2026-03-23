@@ -151,6 +151,14 @@ export interface PublishedComment {
   createdAt: string;
 }
 
+export interface FeedbackDatasetSaveResult {
+  prId: string;
+  savedAt: string;
+  filePath: string;
+  items: number;
+  votes: number;
+}
+
 export interface FeedbackSummary {
   prId: string;
   overall: {

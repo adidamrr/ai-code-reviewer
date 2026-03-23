@@ -165,15 +165,18 @@ def build_publish_comment_body(suggestion: dict[str, Any], mode: str) -> str:
         confidence_text = str(int(round(float(confidence) * 100)))
 
     lines = [
-        f"**{str(suggestion.get('title') or '').strip()}**",
-        str(suggestion.get("body") or "").strip(),
+        f"Title: {str(suggestion.get('title') or '').strip()}",
+        f"Why it matters: {str(suggestion.get('body') or '').strip()}",
+        f"Location: {suggestion.get('filePath')}:{suggestion.get('lineStart')}-{suggestion.get('lineEnd')}",
     ]
     if mode == "issue_comments":
-        lines.append(
-            f"`{suggestion.get('filePath')}:{suggestion.get('lineStart')}-{suggestion.get('lineEnd')}`"
-        )
-    lines.append(
-        f"_Category: {suggestion.get('category')} · Severity: {suggestion.get('severity')} · Confidence: {confidence_text}%_"
+        lines.append("Delivery: summary")
+    lines.extend(
+        [
+            f"Category: {suggestion.get('category')}",
+            f"Severity: {suggestion.get('severity')}",
+            f"Confidence: {confidence_text}%",
+        ]
     )
 
     citations = [
@@ -1218,6 +1221,10 @@ def create_app(config: AppConfig) -> FastAPI:
     @app.get("/prs/{pr_id}/feedback-summary")
     async def get_feedback_summary(pr_id: str) -> dict[str, Any]:
         return store.get_pr_feedback_summary(pr_id)
+
+    @app.post("/prs/{pr_id}/feedback-dataset")
+    async def save_feedback_dataset(pr_id: str) -> dict[str, Any]:
+        return store.save_pr_feedback_dataset(pr_id)
 
     @app.get("/adaptation/status")
     async def get_adaptation_status() -> dict[str, Any]:
