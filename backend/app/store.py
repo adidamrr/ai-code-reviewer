@@ -149,6 +149,56 @@ class InMemoryStore:
         self.installations[installation["id"]] = installation
         self.repositories[repo["id"]] = repo
 
+    def export_state(self) -> dict[str, Any]:
+        return {
+            "installations": self.installations,
+            "repositories": self.repositories,
+            "pull_requests": self.pull_requests,
+            "snapshots": self.snapshots,
+            "snapshot_files": self.snapshot_files,
+            "snapshot_files_by_snapshot": self.snapshot_files_by_snapshot,
+            "jobs": self.jobs,
+            "jobs_by_pr": self.jobs_by_pr,
+            "job_events_by_job": self.job_events_by_job,
+            "job_events": self.job_events,
+            "suggestions": self.suggestions,
+            "suggestions_by_job": self.suggestions_by_job,
+            "comments": self.comments,
+            "comments_by_pr": self.comments_by_pr,
+            "feedback_votes": self.feedback_votes,
+            "feedback_by_comment": self.feedback_by_comment,
+            "suggestion_feature_snapshots": self.suggestion_feature_snapshots,
+            "adaptation_feature_stats": self.adaptation_feature_stats,
+            "adaptation_model_versions": self.adaptation_model_versions,
+            "active_adaptation_model_version": self.active_adaptation_model_version,
+            "publish_runs": self.publish_runs,
+        }
+
+    def import_state(self, payload: dict[str, Any]) -> None:
+        self.installations = dict(payload.get("installations") or {})
+        self.repositories = dict(payload.get("repositories") or {})
+        self.pull_requests = dict(payload.get("pull_requests") or {})
+        self.snapshots = dict(payload.get("snapshots") or {})
+        self.snapshot_files = dict(payload.get("snapshot_files") or {})
+        self.snapshot_files_by_snapshot = dict(payload.get("snapshot_files_by_snapshot") or {})
+        self.jobs = dict(payload.get("jobs") or {})
+        self.jobs_by_pr = dict(payload.get("jobs_by_pr") or {})
+        self.job_events_by_job = dict(payload.get("job_events_by_job") or {})
+        self.job_events = dict(payload.get("job_events") or {})
+        self.suggestions = dict(payload.get("suggestions") or {})
+        self.suggestions_by_job = dict(payload.get("suggestions_by_job") or {})
+        self.comments = dict(payload.get("comments") or {})
+        self.comments_by_pr = dict(payload.get("comments_by_pr") or {})
+        self.feedback_votes = dict(payload.get("feedback_votes") or {})
+        self.feedback_by_comment = dict(payload.get("feedback_by_comment") or {})
+        self.suggestion_feature_snapshots = dict(payload.get("suggestion_feature_snapshots") or {})
+        self.adaptation_feature_stats = dict(payload.get("adaptation_feature_stats") or {})
+        self.adaptation_model_versions = dict(payload.get("adaptation_model_versions") or {})
+        self.active_adaptation_model_version = str(
+            payload.get("active_adaptation_model_version") or self.active_adaptation_model_version
+        )
+        self.publish_runs = dict(payload.get("publish_runs") or {})
+
     def _active_adaptation_model(self) -> dict[str, Any]:
         return self.adaptation_model_versions[self.active_adaptation_model_version]
 
