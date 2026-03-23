@@ -20,7 +20,7 @@ from .errors import HttpError
 from .github_session import GithubSessionStore
 from .pagination import paginate
 from .rag_adapter import get_rag_status
-from .store import InMemoryStore
+from .store_factory import create_store
 
 API_PREFIXES = (
     "/healthz",
@@ -519,7 +519,7 @@ async def parse_json_body(request: Request) -> dict[str, Any]:
 
 def create_app(config: AppConfig) -> FastAPI:
     app = FastAPI(title="SWAGReviewer Backend (Python)", version="1.0.0")
-    store = InMemoryStore()
+    store = create_store()
     github_sessions = GithubSessionStore()
 
     app.add_middleware(

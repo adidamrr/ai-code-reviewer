@@ -12,8 +12,8 @@ Backend MVP for AI code review plugin.
 - Runtime GitHub session endpoints for PAT-based demo flow
 
 ## Runtime notes
-- Current runtime uses in-memory store to unblock integration work.
-- SQL schema is the source for production Postgres implementation.
+- Current runtime uses Postgres when `DATABASE_URL` is configured, and falls back to in-memory mode otherwise.
+- Runtime persistence stores the live application state in Postgres table `runtime_store_state` while the normalized SQL schema remains the target production shape.
 - API shape and enums are aligned with OpenAPI contract.
 
 
