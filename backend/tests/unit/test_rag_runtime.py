@@ -174,6 +174,107 @@ class RagRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("lowerCamelCase", citations[0].snippet)
         self.assertEqual(evidence[0].type, "doc")
 
+    def test_citation_resolver_preserves_multiline_doc_snippets_for_evidence_blocks(self) -> None:
+        chunk = KnowledgeChunk(
+            chunkId="python:asyncio:000777",
+            namespace="python",
+            language="python",
+            sourceId="python-docs",
+            sourceTitle="Python Docs",
+            sourceUrl="https://docs.python.org/3/library/asyncio.html",
+            docPath="/tmp/asyncio.txt",
+            headingPath=["Python Docs", "asyncio", "Examples"],
+            text="await client.fetch()\nresult = normalize(payload)\n\nUse await for IO-bound calls inside coroutines.",
+            charStart=0,
+            charEnd=92,
+            tokenEstimate=20,
+        )
+        task = HunkTask(
+            taskId="lib/example.dart:0",
+            filePath="lib/example.dart",
+            language="Dart",
+            languageSlug="dart",
+            patch="@@ -1 +1 @@\n+final My_var = 1;",
+            hunkIndex=0,
+            hunkHeader="@@ -1 +1 @@",
+            hunkPatch="@@ -1 +1 @@\n+final My_var = 1;",
+            addedLines=["final My_var = 1;"],
+            changedNewLines=[1],
+            firstChangedLine=1,
+            priority=1.0,
+        )
+        context = build_context_pack(task, [], [RetrievalHit(
+            chunkId=chunk.chunkId,
+            namespace=chunk.namespace,
+            sourceId=chunk.sourceId,
+            title=chunk.sourceTitle,
+            url=chunk.sourceUrl,
+            headingPath=chunk.headingPath,
+            text=chunk.text,
+            finalScore=0.9,
+            sparseRank=1,
+            denseRank=1,
+        )])
+
+        evidence, _ = CitationResolver({chunk.chunkId: chunk}).resolve([doc_ref(chunk.chunkId)], context)
+
+        self.assertEqual(evidence[0].snippet.splitlines()[0], "await client.fetch()")
+        self.assertIn("result = normalize(payload)", evidence[0].snippet)
+        self.assertEqual(evidence[0].metadata.get("docPath"), "/tmp/asyncio.txt")
+
+    def test_build_context_pack_creates_focused_code_window_with_highlight(self) -> None:
+        task = HunkTask(
+            taskId="src/example.py:0",
+            filePath="src/example.py",
+            language="Python",
+            languageSlug="python",
+            patch=(
+                "@@ -20,11 +20,11 @@\n"
+                " line_20\n"
+                " line_21\n"
+                " line_22\n"
+                " line_23\n"
+                " line_24\n"
+                "+problem_line()\n"
+                " line_26\n"
+                " line_27\n"
+                " line_28\n"
+                " line_29\n"
+                " line_30"
+            ),
+            hunkIndex=0,
+            hunkHeader="@@ -20,11 +20,11 @@",
+            hunkPatch=(
+                "@@ -20,11 +20,11 @@\n"
+                " line_20\n"
+                " line_21\n"
+                " line_22\n"
+                " line_23\n"
+                " line_24\n"
+                "+problem_line()\n"
+                " line_26\n"
+                " line_27\n"
+                " line_28\n"
+                " line_29\n"
+                " line_30"
+            ),
+            addedLines=["problem_line()"],
+            changedNewLines=[25],
+            firstChangedLine=25,
+            priority=1.0,
+        )
+
+        context = build_context_pack(task, [], [])
+        primary_candidate = context.codeEvidenceCandidates[0]
+        window = primary_candidate.metadata.get("contextWindow")
+
+        self.assertEqual(primary_candidate.lineStart, 25)
+        self.assertIsInstance(window, list)
+        self.assertEqual(len(window), 11)
+        self.assertEqual(window[5]["lineNumber"], 25)
+        self.assertTrue(window[5]["highlight"])
+        self.assertEqual(window[5]["text"], "problem_line()")
+
     def test_validator_rejects_missing_evidence(self) -> None:
         candidate = CandidateFinding(
             filePath="lib/example.dart",

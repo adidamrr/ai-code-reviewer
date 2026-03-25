@@ -156,7 +156,7 @@ def main() -> int:
             headers=backend_headers,
             json={
                 "snapshotId": sync_response["snapshotId"],
-                "scope": ["security", "bugs", "style"],
+                "scope": ["security", "bugs"],
                 "maxComments": 30,
             },
         )

@@ -4,10 +4,33 @@ This repo for AI in engineering education.
 ## Quick Start
 
 ### Docker
+
+#### Вариант 1: локальный Ollama
 ```bash
-docker compose up --build -d
-docker compose exec ollama ollama pull nomic-embed-text
-docker compose exec ollama ollama pull qwen2.5-coder:7b
+docker compose -f docker-compose.ollama.yml up --build -d
+```
+
+Этот compose поднимает `ollama`, автоматически скачивает модели и собирает RAG-индексы.
+
+#### Вариант 2: Yandex Cloud AI Studio
+```bash
+docker compose -f docker-compose.api.yml up --build -d
+```
+
+Этот compose **не поднимает Ollama** и использует Yandex Cloud AI Studio из `.env`.
+
+Заполните `.env` так:
+```env
+RAG_MODEL_PROVIDER=yandex
+RAG_YANDEX_BASE_URL=https://llm.api.cloud.yandex.net/v1
+RAG_YANDEX_FOLDER_ID=ваш_folder_id
+RAG_YANDEX_API_KEY=ваш_api_key
+RAG_YANDEX_DISABLE_DATA_LOGGING=true
+RAG_GENERATION_MODEL=gpt://ваш_folder_id/yandexgpt/latest
+RAG_EVAL_GENERATION_MODEL=gpt://ваш_folder_id/yandexgpt/latest
+RAG_EMBED_MODEL=emb://ваш_folder_id/text-search-doc/latest
+RAG_QUERY_EMBED_MODEL=emb://ваш_folder_id/text-search-query/latest
+RAG_REPAIR_MODEL=gpt://ваш_folder_id/yandexgpt/latest
 ```
 
 Open:
@@ -37,10 +60,18 @@ npm install
 VITE_BACKEND_BASE_URL=http://localhost:4000 npm run dev
 ```
 
-Optional local Ollama:
+Yandex Cloud runtime:
 ```bash
-ollama pull nomic-embed-text
-ollama pull qwen2.5-coder:7b
+export RAG_MODEL_PROVIDER=yandex
+export RAG_YANDEX_BASE_URL=https://llm.api.cloud.yandex.net/v1
+export RAG_YANDEX_FOLDER_ID=your_folder_id
+export RAG_YANDEX_API_KEY=your_api_key
+export RAG_YANDEX_DISABLE_DATA_LOGGING=true
+export RAG_GENERATION_MODEL=gpt://your_folder_id/yandexgpt/latest
+export RAG_EVAL_GENERATION_MODEL=gpt://your_folder_id/yandexgpt/latest
+export RAG_EMBED_MODEL=emb://your_folder_id/text-search-doc/latest
+export RAG_QUERY_EMBED_MODEL=emb://your_folder_id/text-search-query/latest
+export RAG_REPAIR_MODEL=gpt://your_folder_id/yandexgpt/latest
 ```
 
 Useful checks:

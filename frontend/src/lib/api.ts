@@ -3,7 +3,9 @@ import type {
   AnalysisJobEvent,
   AnalysisJobCreateResponse,
   CursorPage,
+  FeedbackDatasetSaveResult,
   FeedbackSummary,
+  GenerationModelProfile,
   GithubPr,
   GithubRepo,
   GithubSession,
@@ -132,7 +134,10 @@ export class ApiClient {
     );
   }
 
-  createAnalysisJob(prId: string, body: { snapshotId: string; scope: SuggestionScope[]; maxComments: number }) {
+  createAnalysisJob(
+    prId: string,
+    body: { snapshotId: string; scope: SuggestionScope[]; maxComments: number; modelProfile: GenerationModelProfile },
+  ) {
     return this.request<AnalysisJobCreateResponse>(`/prs/${prId}/analysis-jobs`, {
       method: "POST",
       body: JSON.stringify(body),
@@ -169,7 +174,7 @@ export class ApiClient {
     });
   }
 
-  publishSuggestions(prId: string, body: { jobId: string; mode: PublishMode; dryRun: boolean }) {
+  publishSuggestions(prId: string, body: { jobId: string; mode: PublishMode; dryRun: boolean; sessionId?: string }) {
     return this.request<{
       publishRunId: string;
       publishedCount: number;
@@ -202,6 +207,12 @@ export class ApiClient {
 
   getFeedbackSummary(prId: string) {
     return this.request<FeedbackSummary>(`/prs/${prId}/feedback-summary`);
+  }
+
+  saveFeedbackDataset(prId: string) {
+    return this.request<FeedbackDatasetSaveResult>(`/prs/${prId}/feedback-dataset`, {
+      method: "POST",
+    });
   }
 
   getPr(prId: string) {

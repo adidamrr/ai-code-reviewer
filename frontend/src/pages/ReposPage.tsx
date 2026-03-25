@@ -9,6 +9,7 @@ export function ReposPage() {
     repos,
     repoCursor,
     selectedRepoId,
+    debugSuiteEnabled,
     debugSuite,
     busy,
     actions,
@@ -53,9 +54,9 @@ export function ReposPage() {
   return (
     <div className="page-wrap">
       <header className="page-header compact">
-        <p className="eyebrow">Шаг 2</p>
+        <p className="eyebrow">Repository Gallery</p>
         <h1>Репозитории</h1>
-        <p className="subline">Выбери репозиторий и открой локальный workflow review только для него.</p>
+        <p className="subline">Выбери репозиторий, открой PR и запускай анализ без отдельного экрана синхронизации.</p>
       </header>
 
       <section className="card stack-gap">
@@ -113,10 +114,11 @@ export function ReposPage() {
         </div>
       </section>
 
-      <section className="card stack-gap">
-        <div className="debug-head">
-          <div>
-            <h2>Debug suite (фиксированные PR)</h2>
+      {debugSuiteEnabled ? (
+        <section className="card stack-gap">
+          <div className="debug-head">
+            <div>
+              <h2>Debug suite (фиксированные PR)</h2>
             <p className="subline">
               Автоматически прогоняет sync + analysis job на 3 заранее заданных PR для воспроизводимых экспериментов.
               {" "}
@@ -176,8 +178,9 @@ export function ReposPage() {
               </div>
             </article>
           ))}
-        </div>
-      </section>
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }

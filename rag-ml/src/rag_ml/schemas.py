@@ -115,6 +115,8 @@ class BuildNamespaceMeta(Model):
 class BuildManifest(Model):
     generatedAt: str
     embeddingModel: str
+    queryEmbeddingModel: str | None = None
+    denseRetrievalEnabled: bool = True
     namespaces: list[BuildNamespaceMeta]
 
 
@@ -186,6 +188,8 @@ class RagRequest(Model):
     description: str | None = None
     baseSha: str | None = None
     headSha: str | None = None
+    generationModel: str | None = None
+    repairModel: str | None = None
     scope: list[str]
     files: list[RagFile]
     limits: RagLimits

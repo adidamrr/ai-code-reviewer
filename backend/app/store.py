@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -36,6 +39,7 @@ from .rag_adapter import analyze_with_rag
 
 MAX_SYNC_FILES = 500
 PATCH_CAP_BYTES = 300 * 1024
+FEEDBACK_DATASET_ROOT = Path(__file__).resolve().parents[1] / "data" / "feedback-datasets"
 
 
 def now_iso() -> str:
@@ -115,6 +119,9 @@ class InMemoryStore:
             bootstrap_model["version"]: bootstrap_model
         }
         self.active_adaptation_model_version = bootstrap_model["version"]
+        self.feedback_dataset_root = Path(
+            os.getenv("FEEDBACK_DATASET_DIR", str(FEEDBACK_DATASET_ROOT))
+        ).resolve()
         self.publish_runs: dict[str, dict[str, Any]] = {}
         self.analysis_tasks: dict[str, asyncio.Task[Any]] = {}
         self.seed()
@@ -141,6 +148,56 @@ class InMemoryStore:
         }
         self.installations[installation["id"]] = installation
         self.repositories[repo["id"]] = repo
+
+    def export_state(self) -> dict[str, Any]:
+        return {
+            "installations": self.installations,
+            "repositories": self.repositories,
+            "pull_requests": self.pull_requests,
+            "snapshots": self.snapshots,
+            "snapshot_files": self.snapshot_files,
+            "snapshot_files_by_snapshot": self.snapshot_files_by_snapshot,
+            "jobs": self.jobs,
+            "jobs_by_pr": self.jobs_by_pr,
+            "job_events_by_job": self.job_events_by_job,
+            "job_events": self.job_events,
+            "suggestions": self.suggestions,
+            "suggestions_by_job": self.suggestions_by_job,
+            "comments": self.comments,
+            "comments_by_pr": self.comments_by_pr,
+            "feedback_votes": self.feedback_votes,
+            "feedback_by_comment": self.feedback_by_comment,
+            "suggestion_feature_snapshots": self.suggestion_feature_snapshots,
+            "adaptation_feature_stats": self.adaptation_feature_stats,
+            "adaptation_model_versions": self.adaptation_model_versions,
+            "active_adaptation_model_version": self.active_adaptation_model_version,
+            "publish_runs": self.publish_runs,
+        }
+
+    def import_state(self, payload: dict[str, Any]) -> None:
+        self.installations = dict(payload.get("installations") or {})
+        self.repositories = dict(payload.get("repositories") or {})
+        self.pull_requests = dict(payload.get("pull_requests") or {})
+        self.snapshots = dict(payload.get("snapshots") or {})
+        self.snapshot_files = dict(payload.get("snapshot_files") or {})
+        self.snapshot_files_by_snapshot = dict(payload.get("snapshot_files_by_snapshot") or {})
+        self.jobs = dict(payload.get("jobs") or {})
+        self.jobs_by_pr = dict(payload.get("jobs_by_pr") or {})
+        self.job_events_by_job = dict(payload.get("job_events_by_job") or {})
+        self.job_events = dict(payload.get("job_events") or {})
+        self.suggestions = dict(payload.get("suggestions") or {})
+        self.suggestions_by_job = dict(payload.get("suggestions_by_job") or {})
+        self.comments = dict(payload.get("comments") or {})
+        self.comments_by_pr = dict(payload.get("comments_by_pr") or {})
+        self.feedback_votes = dict(payload.get("feedback_votes") or {})
+        self.feedback_by_comment = dict(payload.get("feedback_by_comment") or {})
+        self.suggestion_feature_snapshots = dict(payload.get("suggestion_feature_snapshots") or {})
+        self.adaptation_feature_stats = dict(payload.get("adaptation_feature_stats") or {})
+        self.adaptation_model_versions = dict(payload.get("adaptation_model_versions") or {})
+        self.active_adaptation_model_version = str(
+            payload.get("active_adaptation_model_version") or self.active_adaptation_model_version
+        )
+        self.publish_runs = dict(payload.get("publish_runs") or {})
 
     def _active_adaptation_model(self) -> dict[str, Any]:
         return self.adaptation_model_versions[self.active_adaptation_model_version]
@@ -204,6 +261,12 @@ class InMemoryStore:
                 add_vote_counts(stat, totals["up"], totals["down"])
 
         return by_suggestion
+
+    def _feedback_votes_for_comment(self, comment_id: str) -> list[dict[str, Any]]:
+        vote_ids = self.feedback_by_comment.get(comment_id, [])
+        votes = [self.feedback_votes[item_id] for item_id in vote_ids if item_id in self.feedback_votes]
+        votes.sort(key=lambda item: item["updatedAt"], reverse=True)
+        return votes
 
     def _build_training_rows(self) -> list[dict[str, Any]]:
         feedback_by_suggestion = self._rebuild_adaptation_feature_stats()
@@ -548,6 +611,8 @@ class InMemoryStore:
             "snapshotId": snapshot["id"],
             "status": "queued",
             "scope": payload["scope"],
+            "generationModelProfile": payload.get("generationModelProfile"),
+            "generationModel": payload.get("generationModel"),
             "filesFilter": files_filter if files_filter else None,
             "maxComments": payload["maxComments"],
             "progress": {
@@ -690,6 +755,7 @@ class InMemoryStore:
                 "description": "",
                 "baseSha": pr["baseSha"],
                 "headSha": pr["headSha"],
+                "generationModel": job.get("generationModel"),
                 "scope": job["scope"],
                 "files": [
                     {
@@ -824,28 +890,50 @@ class InMemoryStore:
         ranked = self._adapted_suggestions(items)
         return paginate(ranked, cursor, limit)
 
-    def publish(self, pr_id: str, job_id: str, mode: str, dry_run: bool) -> dict[str, Any]:
+    def _publish_key(self, pr_id: str, job_id: str, mode: str, dry_run: bool) -> str:
+        return f"{pr_id}:{job_id}:{mode}:{'dry' if dry_run else 'live'}"
+
+    def get_publish_result(self, pr_id: str, job_id: str, mode: str, dry_run: bool) -> dict[str, Any] | None:
+        existing = self.publish_runs.get(self._publish_key(pr_id, job_id, mode, dry_run))
+        if not existing:
+            return None
+
+        comments = [self.comments[item_id] for item_id in existing["publishedCommentIds"] if item_id in self.comments]
+        return {
+            "publishRunId": existing["id"],
+            "publishedCount": len(existing["publishedCommentIds"]),
+            "errors": existing["errors"],
+            "comments": comments,
+            "idempotent": True,
+        }
+
+    def get_publish_candidates(self, pr_id: str, job_id: str) -> list[dict[str, Any]]:
         job = self.get_job(job_id)
         if job["prId"] != pr_id:
             raise HttpError(422, "job_pr_mismatch", "jobId does not belong to this PR")
-
-        idempotency_key = f"{pr_id}:{job_id}:{mode}"
-        existing = self.publish_runs.get(idempotency_key)
-        if existing:
-            comments = [self.comments[item_id] for item_id in existing["publishedCommentIds"] if item_id in self.comments]
-            return {
-                "publishRunId": existing["id"],
-                "publishedCount": len(existing["publishedCommentIds"]),
-                "errors": existing["errors"],
-                "comments": comments,
-                "idempotent": True,
-            }
 
         suggestion_ids = self.suggestions_by_job.get(job["id"], [])
         adapted = self._adapted_suggestions(
             [self.suggestions[item_id] for item_id in suggestion_ids if item_id in self.suggestions]
         )
-        suggestions = [item for item in adapted if item.get("deliveryMode", "inline") == "inline"]
+        return [item for item in adapted if item.get("deliveryMode", "inline") == "inline"]
+
+    def publish(
+        self,
+        pr_id: str,
+        job_id: str,
+        mode: str,
+        dry_run: bool,
+        published_comments: list[dict[str, Any]] | None = None,
+        errors: list[str] | None = None,
+    ) -> dict[str, Any]:
+        existing = self.get_publish_result(pr_id, job_id, mode, dry_run)
+        if existing:
+            return existing
+
+        suggestions = self.get_publish_candidates(pr_id, job_id)
+        idempotency_key = self._publish_key(pr_id, job_id, mode, dry_run)
+        suggestion_by_id = {item["id"]: item for item in suggestions}
 
         run = {
             "id": f"pubrun_{uuid4()}",
@@ -855,25 +943,44 @@ class InMemoryStore:
             "mode": mode,
             "dryRun": dry_run,
             "publishedCommentIds": [],
-            "errors": [],
+            "errors": list(errors or []),
             "createdAt": now_iso(),
         }
 
         if not dry_run:
-            for suggestion in suggestions:
+            if published_comments is None:
+                published_comments = [
+                    {
+                        "suggestionId": suggestion["id"],
+                        "providerCommentId": f"ghc_{str(uuid4())[:8]}",
+                        "state": "posted",
+                        "filePath": suggestion["filePath"],
+                        "lineStart": suggestion["lineStart"],
+                        "lineEnd": suggestion["lineEnd"],
+                        "body": suggestion["body"],
+                        "createdAt": run["createdAt"],
+                    }
+                    for suggestion in suggestions
+                ]
+
+            for item in published_comments:
+                suggestion_id = str(item.get("suggestionId") or "")
+                suggestion = suggestion_by_id.get(suggestion_id)
+                if not suggestion:
+                    continue
                 comment = {
                     "id": f"cmt_{uuid4()}",
                     "prId": pr_id,
                     "jobId": job_id,
                     "suggestionId": suggestion["id"],
-                    "providerCommentId": f"ghc_{str(uuid4())[:8]}",
-                    "mode": mode,
-                    "state": "posted",
-                    "filePath": suggestion["filePath"],
-                    "lineStart": suggestion["lineStart"],
-                    "lineEnd": suggestion["lineEnd"],
-                    "body": suggestion["body"],
-                    "createdAt": run["createdAt"],
+                    "providerCommentId": str(item.get("providerCommentId") or "") or None,
+                    "mode": str(item.get("mode") or mode),
+                    "state": str(item.get("state") or "posted"),
+                    "filePath": str(item.get("filePath") or suggestion["filePath"]),
+                    "lineStart": int(item.get("lineStart") or suggestion["lineStart"]),
+                    "lineEnd": int(item.get("lineEnd") or suggestion["lineEnd"]),
+                    "body": str(item.get("body") or suggestion["body"]),
+                    "createdAt": str(item.get("createdAt") or run["createdAt"]),
                 }
                 self.comments[comment["id"]] = comment
                 self.comments_by_pr.setdefault(pr_id, []).append(comment["id"])
@@ -960,6 +1067,7 @@ class InMemoryStore:
             existing["reason"] = reason
             existing["updatedAt"] = now
             self._rebuild_adaptation_feature_stats()
+            self.save_pr_feedback_dataset(comment["prId"])
             return existing
 
         feedback = {
@@ -974,6 +1082,7 @@ class InMemoryStore:
         self.feedback_votes[feedback["id"]] = feedback
         self.feedback_by_comment.setdefault(comment_id, []).append(feedback["id"])
         self._rebuild_adaptation_feature_stats()
+        self.save_pr_feedback_dataset(comment["prId"])
         return feedback
 
     def get_comment_feedback(self, comment_id: str) -> dict[str, Any]:
@@ -1046,6 +1155,103 @@ class InMemoryStore:
             "byFile": [{"filePath": key, **value} for key, value in by_file.items()],
             "byCategory": [{"category": key, **value} for key, value in by_category.items()],
             "bySeverity": [{"severity": key, **value} for key, value in by_severity.items()],
+        }
+
+    def build_pr_feedback_dataset(self, pr_id: str) -> dict[str, Any]:
+        pr = self.get_pr(pr_id)
+        comment_ids = self.comments_by_pr.get(pr_id, [])
+        feedback_by_suggestion = self._rebuild_adaptation_feature_stats()
+        items: list[dict[str, Any]] = []
+        total_votes = 0
+
+        for comment_id in comment_ids:
+            comment = self.comments.get(comment_id)
+            if not comment:
+                continue
+
+            suggestion = self.suggestions.get(comment["suggestionId"])
+            if not suggestion:
+                continue
+
+            votes = self._feedback_votes_for_comment(comment["id"])
+            totals = vote_totals(votes)
+            if totals["voteCount"] <= 0:
+                continue
+
+            snapshot = self._ensure_feature_snapshot(suggestion)
+            priors = build_training_priors(snapshot, self.adaptation_feature_stats)
+            training_feedback = feedback_by_suggestion.get(
+                suggestion["id"],
+                {
+                    "smoothedUtility": 0.0,
+                    "voteCount": totals["voteCount"],
+                },
+            )
+            total_votes += totals["voteCount"]
+            items.append(
+                {
+                    "comment": {
+                        "id": comment["id"],
+                        "filePath": comment["filePath"],
+                        "lineStart": comment["lineStart"],
+                        "lineEnd": comment["lineEnd"],
+                        "body": comment["body"],
+                    },
+                    "suggestion": {
+                        "id": suggestion["id"],
+                        "fingerprint": suggestion["fingerprint"],
+                        "title": suggestion["title"],
+                        "body": suggestion["body"],
+                        "category": suggestion["category"],
+                        "severity": suggestion["severity"],
+                        "deliveryMode": suggestion.get("deliveryMode"),
+                        "confidence": suggestion.get("confidence"),
+                    },
+                    "votes": [
+                        {
+                            "id": vote["id"],
+                            "userId": vote["userId"],
+                            "vote": vote["vote"],
+                            "reason": vote.get("reason"),
+                            "createdAt": vote["createdAt"],
+                            "updatedAt": vote["updatedAt"],
+                        }
+                        for vote in votes
+                    ],
+                    "totals": totals,
+                    "snapshot": snapshot,
+                    "trainingRow": {
+                        "features": encode_training_features(snapshot, priors),
+                        "target": float(training_feedback["smoothedUtility"]),
+                        "sampleWeight": int(training_feedback["voteCount"]),
+                    },
+                }
+            )
+
+        return {
+            "schemaVersion": "feedback-dataset.v1",
+            "exportedAt": now_iso(),
+            "repoId": pr["repoId"],
+            "prId": pr_id,
+            "prNumber": pr["number"],
+            "items": items,
+            "counts": {
+                "items": len(items),
+                "votes": total_votes,
+            },
+        }
+
+    def save_pr_feedback_dataset(self, pr_id: str) -> dict[str, Any]:
+        dataset = self.build_pr_feedback_dataset(pr_id)
+        self.feedback_dataset_root.mkdir(parents=True, exist_ok=True)
+        file_path = self.feedback_dataset_root / f"{pr_id}.json"
+        file_path.write_text(json.dumps(dataset, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            "prId": pr_id,
+            "savedAt": dataset["exportedAt"],
+            "filePath": str(file_path),
+            "items": dataset["counts"]["items"],
+            "votes": dataset["counts"]["votes"],
         }
 
     def append_job_event(

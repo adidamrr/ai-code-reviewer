@@ -18,7 +18,7 @@ export const DEBUG_PR_PRESETS: DebugPrPreset[] = [
     owner: "IlyaMr11",
     repo: "MIApp",
     prNumber: 20,
-    scope: ["security", "bugs", "style"],
+    scope: ["security", "bugs"],
     maxComments: 40,
   },
   {
@@ -27,7 +27,7 @@ export const DEBUG_PR_PRESETS: DebugPrPreset[] = [
     owner: "IlyaMr11",
     repo: "MIApp",
     prNumber: 21,
-    scope: ["security", "bugs", "style"],
+    scope: ["security", "bugs"],
     maxComments: 40,
   },
   {
@@ -36,7 +36,7 @@ export const DEBUG_PR_PRESETS: DebugPrPreset[] = [
     owner: "IlyaMr11",
     repo: "MIApp",
     prNumber: 23,
-    scope: ["security", "bugs", "style"],
+    scope: ["security", "bugs"],
     maxComments: 40,
   },
 ];

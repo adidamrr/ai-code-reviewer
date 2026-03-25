@@ -16,8 +16,6 @@ def _base_categories(requested_scope: set[str], file_path: str, static_types: se
         if "bugs" in requested_scope:
             categories.append("bugs")
         return categories
-    if "style" in requested_scope:
-        categories.append("style")
     if "bugs" in requested_scope:
         categories.append("bugs")
     if "performance" in requested_scope and (
@@ -46,7 +44,7 @@ def plan_hotspot_tasks(
     for signal in [*static_checks.signals, *static_checks.toolFindings]:
         signals_by_file[signal.filePath].append(signal)
 
-    requested_scope = {scope for scope in request.scope if scope in {"style", "bugs", "performance", "security"}}
+    requested_scope = {scope for scope in request.scope if scope in {"bugs", "performance", "security"}}
     planned: list[HunkTask] = []
     for file in request.files:
         file_class = classify_file(file)
